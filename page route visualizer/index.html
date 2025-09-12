@@ -146,6 +146,15 @@ gh gist edit d4a9cf90c46c4e91cfc16102a1a56579 .\index.html -f index.html
                         network.once("stabilizationIterationsDone", () => {
                             network.setOptions({ physics: false });
                         });
+                        network.on('doubleClick',async function(e){
+                            const nodeId = e.nodes[0]
+                            if(nodeId){
+                                console.dir(data)
+                                const node = data.nodes.get(nodeId);
+                                const status = await rpcClient.call('locate', {node});
+                                debugger
+                            }
+                        })
 
                         setLoading(false);
                     })

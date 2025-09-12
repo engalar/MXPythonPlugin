@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Impact Analysis</title>
+    <!-- 框架依赖: React, Tailwind, Babel, VConsole (引入本地资源，以便离线使用) -->
+    <script src="assets/react.development.js"></script>
+    <script src="assets/react-dom.development.js"></script>
+    <script src="assets/tailwindcss.js"></script>
+    <script src="assets/babel.min.js"></script>
+    <script src="assets/vconsole.min.js"></script>
+    <script>new VConsole();</script>
+    <!-- vis-network for graph visualization -->
+    <script type="text/javascript" src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+    <link href="https://unpkg.com/vis-network/styles/vis-network.min.css" rel="stylesheet" type="text/css" />
+    <style>
+        #graph-container { height: 90vh; border: 1px solid #ccc; }
+    </style>
+</head>
+<body class="bg-gray-100">
+    <div id="root"></div>
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+
+        function App() {
+            const [status, setStatus] = useState("Please select an element in Mendix Studio Pro and click 'Analyze'.");
+            const graphContainerRef = useRef(null);
+            const networkRef = useRef(null);
+
+            // Listener for messages from the backend
+            useEffect(() => {
+                const handleBackendMessage = (event) => {
+                    if (!event.data || !event.data.type) return;
+
+                    if (event.data.type === 'backend:graph_data') {
+                        const graphData = JSON.parse(event.data.payload);
+                        drawGraph(graphData);
+                        setStatus(`Analysis complete for: ${graphData.centerNodeLabel}`);
+                    } else if (event.data.type === 'backend:status') {
+                        setStatus(event.data.payload);
+                    }
+                };
+
+                window.addEventListener('message', handleBackendMessage);
+                return () => window.removeEventListener('message', handleBackendMessage);
+            }, []);
+
+            // Function to draw/update the graph
+            const drawGraph = ({ nodes, edges }) => {
+                if (graphContainerRef.current) {
+                    const options = {
+                        layout: {
+                            hierarchical: {
+                                enabled: false // Use physics-based layout for better readability
+                            }
+                        },
+                        edges: {
+                            arrows: 'to',
+                            color: '#848484',
+                            font: { align: 'horizontal' }
+                        },
+                        nodes: {
+                            shape: 'box',
+                            font: { color: '#333' }
+                        },
+                        physics: {
+                            solver: 'forceAtlas2Based',
+                            forceAtlas2Based: {
+                                gravitationalConstant: -50,
+                                centralGravity: 0.01,
+                                springLength: 100,
+                                springConstant: 0.08,
+                                avoidOverlap: 0.5
+                            }
+                        },
+                        groups: {
+                            center: { color: { background: '#FFC107', border: '#FF9800' }, font: { color: '#000' } },
+                            microflow: { color: { background: '#2196F3', border: '#1976D2' }, font: { color: '#fff' } },
+                            page: { color: { background: '#4CAF50', border: '#388E3C' }, font: { color: '#fff' } },
+                            entity: { color: { background: '#9C27B0', border: '#7B1FA2' }, font: { color: '#fff' } },
+                            attribute: { color: { background: '#E91E63', border: '#C2185B' }, font: { color: '#fff' } },
+                            default: { color: { background: '#E0E0E0', border: '#9E9E9E' } }
+                        }
+                    };
+                    networkRef.current = new vis.Network(graphContainerRef.current, { nodes, edges }, options);
+                }
+            };
+
+            const handleAnalyzeClick = () => {
+                setStatus("Analyzing... please wait.");
+                // Clear previous graph
+                if (networkRef.current) {
+                    networkRef.current.setData({ nodes: [], edges: [] });
+                }
+                window.parent.sendMessage("frontend:analyze_selection", null);
+            };
+            
+            return (
+                <div className="p-4 h-screen flex flex-col">
+                    <div className="flex-shrink-0 mb-4">
+                        <h1 className="text-xl font-bold">Impact Analysis</h1>
+                        <p className="text-sm text-gray-600">{status}</p>
+                        <button 
+                            onClick={handleAnalyzeClick}
+                            className="mt-2 px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 transition"
+                        >
+                            Analyze Selected Element
+                        </button>
+                    </div>
+                    <div id="graph-container" ref={graphContainerRef} className="flex-grow bg-white"></div>
+                </div>
+            );
+        }
+
+        ReactDOM.render(<App />, document.getElementById('root'));
+    </script>
+</body>
+</html>

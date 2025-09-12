@@ -6,12 +6,14 @@ from Mendix.StudioPro.ExtensionsAPI.Model.Pages import IPage
 from Mendix.StudioPro.ExtensionsAPI.Model.Microflows import IMicroflow
 from Mendix.StudioPro.ExtensionsAPI.Model.Projects import IProject, IModule, IFolder
 import clr
+from System.Text.Json import JsonSerializer
 import json
 from typing import Any, Dict, List, Protocol
 
+# pythonnet库嵌入C#代码
+clr.AddReference("System.Text.Json")
 clr.AddReference("Mendix.StudioPro.ExtensionsAPI")
 
-# pythonnet库嵌入C#代码
 
 # 运行时环境提供的工具
 PostMessage("backend:clear", '')  # 清理IDE控制台日志
@@ -23,14 +25,20 @@ ShowDevTools()  # 打开前端开发者工具
 
 # region define
 # fix c# json与python json转换问题
+
+
 def serialize_json_object(json_object: Any) -> str:
     # 将.NET对象序列化为JSON字符串
     import System.Text.Json
     return System.Text.Json.JsonSerializer.Serialize(json_object)
+
+
 def deserialize_json_string(json_string: str) -> Any:
     # 将JSON字符串反序列化为Python对象
     return json.loads(json_string)
 # mendix model事务工具
+
+
 class TransactionManager:
     """with TransactionManager(currentApp, f"your transaction name"):"""
 
@@ -66,22 +74,35 @@ entity = next((e for e in m.DomainModel.GetEntities()
 ret = dockingWindowService.TryOpenEditor(m.DomainModel, entity)
 PostMessage("backend:info", f"{ret}")
 
-# 接收来自C#的消息
+
 def onMessage(e: Any):
-    if e.Message == "frontend:message":# 接收来自C#转发的前端消息，前端用window.parent.sendMessage("frontend:message", jsonMessageObj)发送消息
+    """
+    接收来自C#的消息
+    Args:
+        e (Any): The event object containing the message type and data from the frontend.
+    Returns:
+        None
+    """
+    # 接收来自C#转发的前端消息，前端用window.parent.sendMessage("frontend:message", jsonMessageObj)发送消息
+    if e.Message == "frontend:message":
         try:
-            message_data = deserialize_json_string(serialize_json_object(e))
-            request_object = message_data.get("Data")
+            # FIX: Use the .NET JsonSerializer to handle the incoming .NET JsonObject (e.Data)
+            # This correctly converts the .NET object to a standard JSON string.
+            request_string = JsonSerializer.Serialize(e.Data)
+
+            # Now, use Python's json library to parse the string into a Python dictionary.
+            request_object = json.loads(request_string)
+
             if request_object:
                 # 处理逻辑
-                response = request_object#简单的echo消息来模拟处理逻辑
-                # 发关消息给前端，前端可以用如下代码来接收
-                #window.addEventListener('message', (event) => {
+                response = request_object  # 简单的echo消息来模拟处理逻辑
+                # 发送消息给前端，前端可以用如下代码来接收
+                # window.addEventListener('message', (event) => {
                 #    if (event.data && event.data.type === 'backendResponse') {
                 #        const payload = event.data.data;// payload就是echo的response
                 #        // your logic here
                 #    }
-                #})
+                # })
                 PostMessage("backend:response", json.dumps(response))
         except Exception as ex:
             PostMessage(

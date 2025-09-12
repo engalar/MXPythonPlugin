@@ -1,4 +1,4 @@
 {
-  "mode": "development",
+  "mode": "execution",
   "defaultPlugin": "page route visualizer"
 }

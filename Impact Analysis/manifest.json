@@ -1,0 +1,7 @@
+{
+  "name": "Impact Analysis",
+  "author": null,
+  "email": null,
+  "ui": "index.html",
+  "plugin": "main.py"
+}
