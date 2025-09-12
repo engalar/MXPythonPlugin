@@ -1,0 +1,7 @@
+{
+  "name": "tutorial",
+  "author": "wengao",
+  "email": "wengao.liu@mendix.com",
+  "ui": "index.html",
+  "plugin": "main.py"
+}

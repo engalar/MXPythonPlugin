@@ -1,3 +1,5 @@
+# https://gist.github.com/engalar/b84b71693c4d1a8addd458e4eec53da3
+# gh gist edit b84b71693c4d1a8addd458e4eec53da3 .\main.py -f main.py
 # pip install pythonnet dependency-injector
 from Mendix.StudioPro.ExtensionsAPI.Model.DomainModels import AssociationDirection, IDomainModel, IEntity, IAttribute, IAttributeType, IStoredValue, IAssociation, IIntegerAttributeType
 from Mendix.StudioPro.ExtensionsAPI.Model.Pages import IPage
