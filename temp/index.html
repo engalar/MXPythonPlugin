@@ -1,0 +1,183 @@
+<!-- 
+gh gist edit d4a9cf90c46c4e91cfc16102a1a56579 .\index.html -f index.html
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Mendix Navigation Visualizer</title>
+    <!-- 框架依赖: React, Tailwind, Babel, VConsole (保持不变) -->
+    <script src="assets/react.development.js"></script>
+    <script src="assets/react-dom.development.js"></script>
+    <script src="assets/tailwindcss.js"></script>
+    <script src="assets/babel.min.js"></script>
+    <!-- <script src="assets/vconsole.min.js"></script> -->
+    <!-- <script>new VConsole();</script> -->
+
+    <!-- [新] 引入 vis-network 库 -->
+    <script type="text/javascript" src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+
+    <style>
+        /* [更新] 为网络图和加载指示器提供全局样式 */
+        #loadingBar {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(243, 244, 246, 0.85); /* Tailwind gray-100 with opacity */
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+            font-size: 1.5em;
+            color: #374151; /* Tailwind gray-700 */
+            z-index: 100;
+        }
+        #mynetwork {
+            width: 100%;
+            height: 100%;
+            border: 1px solid #E5E7EB; /* Tailwind gray-200 */
+        }
+    </style>
+</head>
+
+<body class="bg-gray-100 font-sans">
+    <!-- React 应用的根节点 (保持不变) -->
+    <div id="app"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+
+        // ======================================================================
+        // [框架代码 - 保持不变]
+        // 这是您环境中用于前后端通信的核心RPC客户端，必须保留其结构。
+        // ======================================================================
+        class MendixRpcClient {
+            constructor() {
+                this.requestId = 0;
+                this.pendingRequests = new Map();
+                // 注意: 您的框架使用了'backendResponse'和'window.parent.sendMessage'
+                // 我们将严格遵守这一点。
+                window.addEventListener('message', (event) => {
+                    // 检查 event.data 是否存在且具有 type 属性
+                    if (event.data && event.data.type === 'backendResponse') {
+                        this.handleResponse(event.data.data);
+                    }
+                });
+            }
+            handleResponse(response) {
+                const data = typeof response === 'string' ? JSON.parse(response) : response;
+                const pendingRequest = this.pendingRequests.get(data.requestId);
+                if (pendingRequest) {
+                    this.pendingRequests.delete(data.requestId);
+                    if (data.error) pendingRequest.reject(new Error(data.error.message || data.error));
+                    else pendingRequest.resolve(data.result);
+                }
+            }
+            call(method, params = {}) {
+                const requestId = ++this.requestId;
+                return new Promise((resolve, reject) => {
+                    this.pendingRequests.set(requestId, { resolve, reject, timeout: setTimeout(() => reject(new Error(`Request '${method}' timed out`)), 60000) });
+                    
+                    // 使用您框架指定的 `window.parent.sendMessage`
+                    if (window.parent && typeof window.parent.sendMessage === 'function') {
+                        window.parent.sendMessage("frontend:message", { jsonrpc: "2.0", method, params, id: requestId });
+                    } else {
+                        // 提供一个回退或明确的错误，以防在不同环境中运行
+                        console.error("'window.parent.sendMessage' is not available. Cannot communicate with backend.");
+                        reject(new Error("Mendix communication channel not found."));
+                    }
+                });
+            }
+        }
+        const rpcClient = new MendixRpcClient();
+
+        // ======================================================================
+        // [新功能 - 应用逻辑]
+        // 一个全新的React组件，用于显示可视化网络图。
+        // ======================================================================
+        function App() {
+            const [loading, setLoading] = useState(true);
+            const [error, setError] = useState(null);
+            // 创建一个ref来引用将承载网络图的DOM元素
+            const networkContainerRef = useRef(null);
+
+            useEffect(() => {
+                // 这个effect仅在组件首次挂载时运行一次
+                rpcClient.call('get_navigation_data')
+                    .then(graphData => {
+                        if (!networkContainerRef.current) return;
+
+                        const data = {
+                            nodes: new vis.DataSet(graphData.nodes),
+                            edges: new vis.DataSet(graphData.edges),
+                        };
+
+                        const options = {
+                            nodes: {
+                                shape: 'dot', size: 20, borderWidth: 2,
+                                font: { size: 14, color: '#374151' },
+                            },
+                            edges: {
+                                width: 2,
+                                font: { align: 'middle', size: 12, color: '#6B7280' },
+                                arrows: { to: { enabled: true, scaleFactor: 1 } }
+                            },
+                            physics: {
+                                solver: 'forceAtlas2Based',
+                                forceAtlas2Based: { gravitationalConstant: -50, centralGravity: 0.01, springLength: 100, springConstant: 0.08, avoidOverlap: 0.5 },
+                                stabilization: { iterations: 200 }
+                            },
+                            groups: {
+                                navigation: { color: { background: '#FBBF24', border: '#F59E0B' }, shape: 'star', size: 30 },
+                                menu: { color: { background: '#60A5FA', border: '#3B82F6' }, shape: 'box' },
+                                page: { color: { background: '#4ADE80', border: '#22C55E' }, shape: 'ellipse' },
+                                microflow: { color: { background: '#F87171', border: '#EF4444' }, shape: 'triangle' },
+                                userRole: { color: { background: '#A78BFA', border: '#8B5CF6' }, shape: 'icon', icon: { face: "'Font Awesome 5 Free'", code: '\uf007', size: 50, color: '#8B5CF6' } },
+                                moduleRole: { color: { background: '#F472B6', border: '#EC4899' }, shape: 'dot', size: 12 }
+                            },
+                            interaction: { hover: true, tooltipDelay: 200 }
+                        };
+
+                        const network = new vis.Network(networkContainerRef.current, data, options);
+                        
+                        network.once("stabilizationIterationsDone", () => {
+                            network.setOptions({ physics: false });
+                        });
+
+                        setLoading(false);
+                    })
+                    .catch(err => {
+                        console.error("Failed to get navigation data:", err);
+                        setError(err.message);
+                        setLoading(false);
+                    });
+            }, []); // 空依赖数组确保effect只运行一次
+
+            return (
+                <div className="h-screen w-screen relative">
+                    {loading && (
+                        <div id="loadingBar">
+                            <p>Loading Mendix Model Data...</p>
+                        </div>
+                    )}
+                    {error && (
+                        <div id="loadingBar">
+                            <p className="text-red-600 font-bold">An Error Occurred</p>
+                            <pre className="text-xs text-left bg-red-100 p-2 rounded mt-2 max-w-lg">{error}</pre>
+                        </div>
+                    )}
+                    <div id="mynetwork" ref={networkContainerRef} className="w-full h-full" />
+                </div>
+            );
+        }
+
+        // --- React应用的启动点 (保持不变) ---
+        const root = ReactDOM.createRoot(document.getElementById('app'));
+        root.render(<App />);
+
+    </script>
+</body>
+</html>

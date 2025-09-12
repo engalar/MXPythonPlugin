@@ -1,0 +1,7 @@
+{
+    "name": "Mendix Navigation Visualizer",
+    "author": "wengao",
+    "email": "liuwengao@foxmail.com",
+    "ui": "index.html",
+    "plugin": "main.py"
+}

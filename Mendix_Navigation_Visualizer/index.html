@@ -1,0 +1,458 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Mendix Traceability Analyzer (with React Flow)</title>
+    <script src="assets/react.development.js"></script>
+    <script src="assets/react-dom.development.js"></script>
+    <script src="assets/tailwindcss.js"></script>
+    <script src="assets/babel.min.js"></script>
+    <script src="assets/vconsole.min.js"></script>
+    <script src="assets/awilix.umd.js"></script>
+    <script>new VConsole();</script>
+
+    <!-- React Flow CDN assets -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reactflow@11.11.4/dist/style.min.css" />
+    <script src="https://cdn.jsdelivr.net/npm/reactflow@11.11.4/dist/umd/index.min.js"></script>
+</head>
+<body class="bg-gray-100 font-sans">
+    <div id="app"></div>
+
+<script type="text/babel">
+    const { useState, useMemo, useEffect, useCallback } = React;
+    const { createContainer, asClass, asValue, InjectionMode } = Awilix;
+
+    // Destructure React Flow from the global window object provided by the CDN
+    const { 
+        default: ReactFlow, 
+        Background, 
+        Controls, 
+        useNodesState, 
+        useEdgesState,
+        MarkerType
+    } = window.ReactFlow;
+
+    // == 1. LOW-LEVEL MODULES (DETAILS) - [UNCHANGED] ==
+    class MendixRpcClient {
+      constructor() {
+        this.requestId = 0;
+        this.pendingRequests = new Map();
+        window.addEventListener('message', (event) => {
+          if (event.data.type === 'backendResponse') {
+            this.handleResponse(event.data.data);
+          }
+        });
+      }
+      handleResponse(response) {
+        try {
+          const data = typeof response === 'string' ? JSON.parse(response) : response;
+          const requestId = data.requestId;
+          const pendingRequest = this.pendingRequests.get(requestId);
+          if (pendingRequest) {
+            this.pendingRequests.delete(requestId);
+            if (data.error) {
+              pendingRequest.reject(new Error(data.error));
+            } else {
+              pendingRequest.resolve(data.result);
+            }
+          }
+        } catch (error) {
+          console.error('Error handling response:', error);
+        }
+      }
+      call(method, params = {}) {
+        const requestId = ++this.requestId;
+        return new Promise((resolve, reject) => {
+          this.pendingRequests.set(requestId, { resolve, reject });
+          window.parent.sendMessage("frontend:message", { jsonrpc: "2.0", method, params, id: requestId });
+        });
+      }
+
+      getTraceabilityGraph() { return this.call('getTraceabilityGraph'); }
+      // [NEW] Analysis RPC calls
+      findPaths(startNodeId, endNodeId) { return this.call('findPaths', { startNodeId, endNodeId }); }
+      findCommonUpstream(nodeIds) { return this.call('findCommonUpstream', { nodeIds }); }
+      findCommonDownstream(nodeIds) { return this.call('findCommonDownstream', { nodeIds }); }
+      getSubgraph(nodeIds) { return this.call('getSubgraph', { nodeIds }); }
+    }
+
+    // == 2. APPLICATION CORE (ABSTRACTIONS & LOGIC) - [EXTENDED] ==
+    class AppState {
+      constructor(onStateChange) {
+        this._onStateChange = onStateChange;
+        this.state = {
+          graphData: { nodes: [], edges: [] },
+          selectedNodeIds: new Set(),
+          analysisResult: null, // { type: 'graph', data: any, isPath: boolean }
+          loading: true,
+          analysisLoading: false,
+        };
+      }
+      _update(newState) { this.state = { ...this.state, ...newState }; this._onStateChange(this.state); }
+      setGraphData(graphData) { this._update({ graphData, loading: false }); }
+      toggleSelection(nodeId) {
+        const newSet = new Set(this.state.selectedNodeIds);
+        if (newSet.has(nodeId)) { newSet.delete(nodeId); }
+        else { newSet.add(nodeId); }
+        this._update({ selectedNodeIds: newSet });
+      }
+      clearSelection() { this._update({ selectedNodeIds: new Set(), analysisResult: null }); }
+      setAnalysisResult(result) { this._update({ analysisResult: result, analysisLoading: false }); }
+      setLoading(loading) { this._update({ loading }); }
+      setAnalysisLoading(loading) { this._update({ analysisLoading: loading }); }
+    }
+
+    class TraceabilityService {
+      constructor({ rpcClient, appState }) {
+        this.rpcClient = rpcClient;
+        this.appState = appState;
+      }
+
+      async fetchGraph() {
+        this.appState.setLoading(true);
+        this.appState.clearSelection(); // Clear selection when fetching new graph
+        try {
+          const response = await this.rpcClient.getTraceabilityGraph();
+          this.appState.setGraphData(response);
+        } catch (error) {
+          alert('Error fetching graph: ' + error.message);
+          this.appState.setLoading(false);
+        }
+      };
+      
+      toggleNodeSelection = (nodeId) => this.appState.toggleSelection(nodeId);
+      clearNodeSelection = () => this.appState.clearSelection();
+
+      performAnalysis = async (type) => {
+        this.appState.setAnalysisLoading(true);
+        this.appState.setAnalysisResult(null); // Clear previous result
+        const selectedIds = Array.from(this.appState.state.selectedNodeIds);
+        try {
+            let resultData;
+            let isPath = false;
+            
+            if (type === 'PATH' && selectedIds.length === 2) {
+                const paths = await this.rpcClient.findPaths(selectedIds[0], selectedIds[1]);
+                const nodesMap = new Map();
+                // Ensure all nodes in the path are captured
+                (paths[0] || []).forEach(node => nodesMap.set(node.id, node));
+                const edges = [];
+                if (paths && paths[0]) {
+                  for (let i = 0; i < paths[0].length - 1; i++) {
+                      edges.push({ source: paths[0][i].id, target: paths[0][i+1].id, type: 'FOLLOWS' });
+                  }
+                }
+                resultData = { nodes: Array.from(nodesMap.values()), edges };
+                isPath = true;
+            } else if (type === 'UPSTREAM' && selectedIds.length > 0) {
+                resultData = await this.rpcClient.findCommonUpstream(selectedIds);
+            } else if (type === 'DOWNSTREAM' && selectedIds.length > 0) {
+                resultData = await this.rpcClient.findCommonDownstream(selectedIds);
+            } else if (type === 'SUBGRAPH' && selectedIds.length > 0) {
+                resultData = await this.rpcClient.getSubgraph(selectedIds);
+            }
+            
+            if (resultData) {
+                this.appState.setAnalysisResult({ type: 'graph', data: resultData, isPath });
+            } else {
+                // If no data returned or invalid input, clear loading state
+                this.appState.setAnalysisLoading(false);
+            }
+        } catch (error) {
+            alert('Analysis Error: ' + error.message);
+            this.appState.setAnalysisLoading(false);
+        }
+      }
+    }
+
+    // == 3. UI LAYER (DUMB COMPONENTS) ==
+    const NODE_TYPE_CONFIG = {
+        PAGE: { icon: '📄', color: '#dbfde9', borderColor: '#6ee7b7' },
+        MICROFLOW: { icon: '⚙️', color: '#dbeafe', borderColor: '#93c5fd' },
+        NAVIGATION_ITEM: { icon: '🧭', color: '#e0e7ff', borderColor: '#a5b4fc' },
+        ENTITY: { icon: '📦', color: '#fef9c3', borderColor: '#fde047' },
+        UNKNOWN: { icon: '❓', color: '#e5e7eb', borderColor: '#9ca3af' },
+    };
+    
+    // Component for individual nodes in the explorer list
+    function CompactNodeItem({ node, onSelect, isSelected }) {
+        const config = NODE_TYPE_CONFIG[node.type] || NODE_TYPE_CONFIG.UNKNOWN;
+        return (
+            <div onClick={() => onSelect(node.id)} className={`flex items-center p-1 mb-1 rounded cursor-pointer transition-all text-xs ${isSelected ? 'bg-blue-100 ring-1 ring-blue-400' : 'hover:bg-gray-200'}`}>
+                <input type="checkbox" checked={isSelected} readOnly className="mr-2 pointer-events-none" />
+                <span className="mr-2">{config.icon}</span>
+                <span className="truncate flex-grow">{node.name}</span>
+            </div>
+        );
+    }
+    
+    // The left-hand panel for exploring and selecting nodes
+    function ExplorerPanel({ nodes, onSelect, onRefresh, loading, selectedNodeIds }) {
+      const [searchTerm, setSearchTerm] = useState('');
+      const groupedNodes = useMemo(() => {
+        const filtered = nodes.filter(n => 
+            n.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
+            n.module.toLowerCase().includes(searchTerm.toLowerCase())
+        );
+        return filtered.reduce((acc, node) => {
+            (acc[node.module] = acc[node.module] || []).push(node);
+            return acc;
+        }, {});
+      }, [nodes, searchTerm]);
+
+      return (
+        <div className="h-full flex flex-col bg-white border-r">
+            <div className="p-1 border-b flex items-center space-x-1">
+                <button onClick={onRefresh} disabled={loading} className="p-1 rounded hover:bg-gray-100 disabled:opacity-50">
+                    {loading ? '...' : '🔄'}
+                </button>
+                <input type="text" placeholder="Search..." className="w-full p-1 border rounded text-sm" value={searchTerm} onChange={e => setSearchTerm(e.target.value)} />
+            </div>
+            <div className="overflow-y-auto flex-grow p-1">
+                {Object.entries(groupedNodes).sort().map(([moduleName, nodesInModule]) => (
+                    <details key={moduleName} open>
+                        <summary className="font-bold text-sm cursor-pointer py-1 text-gray-700">{moduleName}</summary>
+                        <div className="pl-2 ml-1">
+                            {nodesInModule.sort((a,b) => a.name.localeCompare(b.name)).map(node => <CompactNodeItem key={node.id} node={node} onSelect={onSelect} isSelected={selectedNodeIds.has(node.id)} />)}
+                        </div>
+                    </details>
+                ))}
+            </div>
+        </div>
+      );
+    }
+    
+    // Component to display the graph visualization using React Flow
+    function GraphViewer({ graphData, isPath }) {
+        const { nodes: rawNodes, edges: rawEdges } = graphData;
+
+        const layoutedElements = useMemo(() => {
+            if (!rawNodes || rawNodes.length === 0) {
+                return { nodes: [], edges: [] };
+            }
+
+            const nodes = rawNodes.map((node, index) => {
+                const config = NODE_TYPE_CONFIG[node.type] || NODE_TYPE_CONFIG.UNKNOWN;
+                const nodeWidth = 170;
+                const nodeHeight = 40;
+                const nodesPerRow = 4; // Number of nodes per row for basic layout
+
+                return {
+                    id: node.id,
+                    position: {
+                        x: (index % nodesPerRow) * (nodeWidth + 50), // Basic horizontal spacing
+                        y: Math.floor(index / nodesPerRow) * (nodeHeight + 40), // Basic vertical spacing
+                    },
+                    data: {
+                        label: (
+                            <div className="flex items-center">
+                                <span className="mr-2 text-base">{config.icon}</span>
+                                <div className="flex flex-col">
+                                    <span className="font-bold text-xs">{node.name}</span>
+                                    <span className="text-gray-500" style={{ fontSize: '10px' }}>{node.module}</span>
+                                </div>
+                            </div>
+                        ),
+                    },
+                    style: {
+                        backgroundColor: config.color,
+                        borderColor: config.borderColor,
+                        borderWidth: '1px',
+                        width: nodeWidth,
+                        height: nodeHeight,
+                        fontSize: '12px',
+                        padding: '5px',
+                        borderRadius: '8px', // Slightly rounded corners
+                        boxShadow: '0 1px 3px rgba(0,0,0,0.1)',
+                    },
+                };
+            });
+
+            const edges = rawEdges.map(edge => ({
+                id: `e-${edge.source}-${edge.target}`,
+                source: edge.source,
+                target: edge.target,
+                type: 'smoothstep', // Use smooth curves for edges
+                animated: isPath, // Animate edges if it's a path analysis
+                markerEnd: {
+                    type: MarkerType.ArrowClosed, // Add arrow marker to indicate direction
+                },
+                style: {
+                    strokeWidth: 2,
+                    stroke: '#9ca3af', // Default edge color
+                },
+            }));
+            
+            return { nodes, edges };
+        }, [rawNodes, rawEdges, isPath]);
+
+        const [nodes, setNodes, onNodesChange] = useNodesState(layoutedElements.nodes);
+        const [edges, setEdges, onEdgesChange] = useEdgesState(layoutedElements.edges);
+
+        // Update internal state when graphData changes
+        useEffect(() => {
+            setNodes(layoutedElements.nodes);
+            setEdges(layoutedElements.edges);
+        }, [layoutedElements, setNodes, setEdges]);
+        
+        if (rawNodes.length === 0) {
+            return <div className="text-center text-gray-400 mt-8 text-sm">No results to display. Run an analysis to see the graph.</div>;
+        }
+
+        return (
+            <div style={{ height: '100%', width: '100%' }}>
+                <ReactFlow
+                    nodes={nodes}
+                    edges={edges}
+                    onNodesChange={onNodesChange}
+                    onEdgesChange={onEdgesChange}
+                    fitView // Automatically zooms to fit all elements
+                    fitViewOptions={{ padding: 0.1 }} // Add some padding around elements
+                    proOptions={{ hideAttribution: true }} // Hides the "React Flow" attribution
+                >
+                    <Controls /> {/* Adds zoom and pan controls */}
+                    <Background variant="dots" gap={12} size={1} color="#e5e7eb" /> {/* Light grey dots background */}
+                </ReactFlow>
+            </div>
+        );
+    }
+
+    // The main right-hand panel that hosts the analysis controls and results
+    function AnalysisCanvas({ allNodes, selectedNodeIds, analysisResult, onAnalyze, onClear, analysisLoading }) {
+      const selectedNodes = useMemo(() => allNodes.filter(n => selectedNodeIds.has(n.id)), [allNodes, selectedNodeIds]);
+      
+      // Reusable Button component with disabled state tied to analysis loading
+      const Button = ({ onClick, disabled, children }) => (
+        <button 
+          onClick={onClick} 
+          disabled={disabled || analysisLoading} 
+          className="text-xs px-2 py-1 bg-gray-200 rounded hover:bg-gray-300 disabled:opacity-50 disabled:cursor-not-allowed transition-colors
+                     focus:outline-none focus:ring-2 focus:ring-blue-400 focus:ring-opacity-75"
+        >
+            {children}
+        </button>
+      );
+      
+      return (
+        <div className="h-full flex flex-col p-2 bg-gray-50">
+            {/* -- Top Control Panel: Selection and Actions -- */}
+            <div className="flex-shrink-0 border rounded-lg p-2 bg-white mb-2 shadow-sm">
+                <div className="flex justify-between items-center mb-1">
+                    <h3 className="font-semibold text-sm">Analysis Set ({selectedNodes.length})</h3>
+                    <button onClick={onClear} disabled={selectedNodes.length === 0 || analysisLoading} className="text-xs text-red-500 hover:underline disabled:opacity-50">Clear</button>
+                </div>
+                {/* Display selected nodes */}
+                <div className="max-h-24 overflow-y-auto text-xs text-gray-600 mb-2 border-t pt-1">
+                  {selectedNodes.length > 0 ? selectedNodes.map(n => <div key={n.id}>- {n.name}</div>) : <div className="italic text-gray-400">Select nodes from the explorer.</div>}
+                </div>
+                {/* Analysis Action Buttons */}
+                <div className="flex flex-wrap space-x-2 space-y-1 border-t pt-2">
+                    <Button onClick={() => onAnalyze('PATH')} disabled={selectedNodes.length !== 2}>Find Path</Button>
+                    <Button onClick={() => onAnalyze('SUBGRAPH')} disabled={selectedNodes.length < 1}>Show Relations</Button>
+                    <Button onClick={() => onAnalyze('UPSTREAM')} disabled={selectedNodes.length < 1}>Common Deps</Button>
+                    <Button onClick={() => onAnalyze('DOWNSTREAM')} disabled={selectedNodes.length < 1}>Common Impacts</Button>
+                </div>
+            </div>
+
+            {/* -- Bottom Results Panel: Graph Visualization -- */}
+            <div className="flex-grow border rounded-lg bg-white shadow-sm relative overflow-hidden">
+                {/* Loading overlay */}
+                {analysisLoading && <div className="absolute inset-0 bg-white bg-opacity-75 flex items-center justify-center z-10 text-lg font-semibold">
+                    Analyzing...
+                </div>}
+                
+                {/* Display analysis results */}
+                {analysisResult && analysisResult.type === 'graph' && (
+                    <GraphViewer graphData={analysisResult.data} isPath={analysisResult.isPath} />
+                )}
+                
+                {/* Placeholder when no analysis has been run */}
+                {!analysisResult && !analysisLoading && <div className="text-center text-gray-400 mt-8 text-sm">Run an analysis to see the results here.</div>}
+            </div>
+        </div>
+      );
+    }
+    
+    // Main App component
+    function App({ appState, traceabilityService }) {
+        useEffect(() => { traceabilityService.fetchGraph(); }, [traceabilityService]); // Fetch graph on mount
+        const [leftWidth, setLeftWidth] = useState(280); // Initial width for the explorer panel
+
+        // Logic for resizing the explorer panel
+        const handleMouseDown = (e) => {
+            const startX = e.clientX; 
+            const startWidth = leftWidth;
+            // Handler for moving the mouse while dragging
+            const handleMouseMove = (me) => setLeftWidth(Math.max(200, startWidth + me.clientX - startX)); // Min width 200px
+            // Handler for releasing the mouse button
+            const handleMouseUp = () => {
+                document.removeEventListener('mousemove', handleMouseMove);
+                document.removeEventListener('mouseup', handleMouseUp);
+            };
+            document.addEventListener('mousemove', handleMouseMove);
+            document.addEventListener('mouseup', handleMouseUp, { once: true }); // Use once to automatically clean up
+        };
+      
+        return (
+            <div className="flex h-screen w-screen bg-white text-gray-800">
+                {/* Explorer Panel */}
+                <div style={{ width: `${leftWidth}px` }} className="flex-shrink-0 h-full border-r">
+                    <ExplorerPanel 
+                        nodes={appState.graphData.nodes} 
+                        onSelect={traceabilityService.toggleNodeSelection}
+                        onRefresh={traceabilityService.fetchGraph}
+                        loading={appState.loading}
+                        selectedNodeIds={appState.selectedNodeIds}
+                    />
+                </div>
+                {/* Resizer Handle */}
+                <div onMouseDown={handleMouseDown} className="w-1 cursor-col-resize bg-gray-200 hover:bg-blue-500 transition-colors" />
+                {/* Analysis Canvas Panel */}
+                <div className="flex-grow h-full overflow-hidden">
+                    <AnalysisCanvas
+                        allNodes={appState.graphData.nodes}
+                        selectedNodeIds={appState.selectedNodeIds}
+                        analysisResult={appState.analysisResult}
+                        onAnalyze={traceabilityService.performAnalysis}
+                        onClear={traceabilityService.clearNodeSelection}
+                        analysisLoading={appState.analysisLoading}
+                    />
+                </div>
+            </div>
+        );
+    }
+    
+    // == 4. COMPOSITION ROOT ==
+    function AppContainer() {
+      // Setup dependency injection container
+      const container = useMemo(() => createContainer({ injectionMode: InjectionMode.PROXY }), []);
+      
+      // Initialize application state
+      const [appState, setAppState] = useState({
+          graphData: { nodes: [], edges: [] },
+          selectedNodeIds: new Set(),
+          analysisResult: null,
+          loading: true,
+          analysisLoading: false,
+      });
+
+      // Initialize and register services
+      const traceabilityService = useMemo(() => {
+        const appStateInstance = new AppState(setAppState);
+        container.register({
+          rpcClient: asClass(MendixRpcClient).singleton(),
+          appState: asValue(appStateInstance),
+          traceabilityService: asClass(TraceabilityService).singleton(),
+        });
+        return container.resolve('traceabilityService');
+      }, [container]); // Dependency on container ensures it's created once
+
+      // Render the main App component
+      return <App appState={appState} traceabilityService={traceabilityService} />;
+    }
+
+    // Render the React application
+    const root = ReactDOM.createRoot(document.getElementById('app'));
+    root.render(<AppContainer />);
+</script>
+</html>

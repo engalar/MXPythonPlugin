@@ -1,0 +1,369 @@
+<!-- gh gist edit 536df8e04cd5574946a62414abb12ad8 .\index.html -f index.html -->
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <title>Mendix Model Browser</title>
+  <script src="assets/react.development.js"></script>
+  <script src="assets/react-dom.development.js"></script>
+  <script src="assets/tailwindcss.js"></script>
+  <script src="assets/babel.min.js"></script>
+  <script src="assets/vconsole.min.js"></script>
+  <script>new VConsole();</script>
+  <style>
+    .copy-icon {
+      opacity: 0.2;
+      transition: opacity 0.2s;
+      cursor: pointer;
+    }
+
+    .group-hover:hover .copy-icon,
+    .copy-icon:hover {
+      opacity: 1;
+    }
+
+    .tooltip {
+      position: relative;
+      display: inline-block;
+    }
+
+    .tooltip .tooltiptext {
+      visibility: hidden;
+      width: 120px;
+      background-color: #555;
+      color: #fff;
+      text-align: center;
+      border-radius: 6px;
+      padding: 5px 0;
+      position: absolute;
+      z-index: 1;
+      bottom: 125%;
+      left: 50%;
+      margin-left: -60px;
+      opacity: 0;
+      transition: opacity 0.3s;
+    }
+
+    .tooltip .tooltiptext::after {
+      content: "";
+      position: absolute;
+      top: 100%;
+      left: 50%;
+      margin-left: -5px;
+      border-width: 5px;
+      border-style: solid;
+      border-color: #555 transparent transparent transparent;
+    }
+
+    .tooltip:hover .tooltiptext {
+      visibility: visible;
+      opacity: 1;
+    }
+  </style>
+</head>
+
+<body class="bg-gray-100 font-sans text-sm">
+  <div id="app"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useCallback, useMemo } = React;
+
+    // --- 1. RPC Client ---
+    class MendixRpcClient {
+      constructor() {
+        this.requestId = 0;
+        this.pendingRequests = new Map();
+        window.addEventListener('message', (event) => {
+          if (event.data.type === 'backendResponse') this.handleResponse(event.data.data);
+        });
+      }
+      handleResponse(response) {
+        const data = typeof response === 'string' ? JSON.parse(response) : response;
+        const pendingRequest = this.pendingRequests.get(data.requestId);
+        if (pendingRequest) {
+          this.pendingRequests.delete(data.requestId);
+          if (data.error) pendingRequest.reject(new Error(data.error.message || data.error));
+          else pendingRequest.resolve(data.result);
+        }
+      }
+      call(method, params = {}) {
+        const requestId = ++this.requestId;
+        return new Promise((resolve, reject) => {
+          this.pendingRequests.set(requestId, { resolve, reject });
+          window.parent.sendMessage("frontend:message", { jsonrpc: "2.0", method, params, id: requestId });
+        });
+      }
+      getNodeChildren(nodeId) { return this.call('getNodeChildren', { nodeId }); }
+      getNodeDetails(nodeId) { return this.call('getNodeDetails', { nodeId }); }
+      getPropertyChildren(propertyId) { return this.call('getPropertyChildren', { propertyId }); }
+    }
+    const rpcClient = new MendixRpcClient();
+
+    // --- Helper function for copying to clipboard ---
+    function copyToClipboard(text, tooltipRef) {
+      navigator.clipboard.writeText(text).then(() => {
+        if (tooltipRef && tooltipRef.current) {
+          const originalText = tooltipRef.current.innerText;
+          tooltipRef.current.innerText = 'Copied!';
+          setTimeout(() => {
+            tooltipRef.current.innerText = originalText;
+          }, 1500);
+        }
+      }).catch(err => {
+        console.error('Failed to copy: ', err);
+        alert('Failed to copy text to clipboard.');
+      });
+    }
+
+    // --- 2. UI Components ---
+
+    function CopyButton({ textToCopy, tooltipText = "Copy path" }) {
+      const tooltipRef = React.useRef(null);
+      return (
+        <div className="tooltip" onClick={(e) => { e.stopPropagation(); copyToClipboard(textToCopy, tooltipRef); }}>
+          <span className="copy-icon ml-2">
+            <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+          </span>
+          <span className="tooltiptext" ref={tooltipRef}>{tooltipText}</span>
+        </div>
+      );
+    }
+
+    function CollapsibleSection({ title, count, children, defaultOpen = false, path }) {
+      const [isOpen, setIsOpen] = useState(defaultOpen);
+      return (
+        <div className="mb-4">
+          <h3 onClick={() => setIsOpen(!isOpen)} className="group-hover font-semibold text-gray-700 border-b pb-1 mb-2 cursor-pointer flex justify-between items-center select-none">
+            <span className="flex items-center">
+              {title} ({count})
+              {path && <CopyButton textToCopy={path} />}
+            </span>
+            <span className="text-gray-500 text-xs transform transition-transform">{isOpen ? '▼' : '►'}</span>
+          </h3>
+          {isOpen && children}
+        </div>
+      );
+    }
+
+    function PropertyNode({ node, level = 0, parentPath = '' }) {
+      const [isExpanded, setIsExpanded] = useState(false);
+      const [children, setChildren] = useState([]);
+      const [isLoading, setIsLoading] = useState(false);
+
+      const handleToggle = async () => {
+        if (!node.hasChildren) return;
+        const nextExpandedState = !isExpanded;
+        setIsExpanded(nextExpandedState);
+        if (nextExpandedState && children.length === 0) {
+          setIsLoading(true);
+          try {
+            let result = await rpcClient.getPropertyChildren(node.id);
+            setChildren(result);
+          } catch (e) {
+            alert(`Error fetching property children: ${e.message}`);
+            setIsExpanded(false);
+          } finally {
+            setIsLoading(false);
+          }
+        }
+      };
+
+      const isResolvableElement = node.valueType === 'ResolvableElement';
+
+      const currentPath = useMemo(() => {
+        // e.g., @['entities'][0] or @['entities'][Name='Account']
+        if (node.name.startsWith('[')) {
+          return `${parentPath}${node.name}`;
+        }
+        // e.g., @['entities'][Name='Account']['generalization']
+        return `${parentPath}['${node.name}']`;
+      }, [parentPath, node.name]);
+
+      return (
+        <div className="border-b hover:bg-gray-50 text-xs">
+          <div className="group-hover flex items-center" style={{ paddingLeft: `${level * 16}px` }} onClick={handleToggle}>
+            <div className={`p-1 flex items-center flex-grow ${node.hasChildren ? 'cursor-pointer' : ''}`}>
+              <span className="w-5 h-5 text-center text-gray-500 mr-1 flex-shrink-0">
+                {node.hasChildren ? (isExpanded ? '▼' : '►') : <span className="inline-block w-3"></span>}
+              </span>
+              <span className="font-mono text-gray-600 break-all w-2/5 pr-2">{node.name}</span>
+              <span className={`break-all w-2/5 pr-2 ${isResolvableElement ? 'italic text-purple-700' : ''}`}>
+                {node.value}
+              </span>
+              <span className="text-gray-500 break-all w-1/5">{node.type}</span>
+            </div>
+            <CopyButton textToCopy={currentPath} />
+          </div>
+          {isExpanded && (
+            <div>
+              {isLoading && <div style={{ paddingLeft: `${(level + 1) * 16}px` }} className="text-gray-400 italic p-1">Loading...</div>}
+              {children.map(child => <PropertyNode key={child.id} node={child} level={level + 1} parentPath={currentPath} />)}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    function InspectorPanel({ selectedNode, loading }) {
+      if (loading) return <div className="p-4 text-gray-500">Loading details...</div>;
+      if (!selectedNode || !selectedNode.details) return <div className="p-4 text-gray-500">Select a unit to see its details.</div>;
+
+      const { details } = selectedNode;
+      const { name, type, properties, elements } = details;
+
+      const groupedElements = elements.reduce((acc, el) => {
+        (acc[el.type] = acc[el.type] || []).push(el);
+        return acc;
+      }, {});
+
+      return (
+        <div className="p-3 bg-white h-full overflow-y-auto">
+          <h2 className="text-lg font-bold text-gray-800 break-all">{name}</h2>
+          <p className="text-xs text-blue-600 bg-blue-100 rounded px-2 py-0.5 inline-block mb-4">{type}</p>
+
+          <CollapsibleSection title="Internal Elements" count={elements.length} defaultOpen={false}>
+            {elements.length > 0 ? (
+              Object.entries(groupedElements).map(([elementType, elementList]) => {
+                // e.g., @DomainModels$Entity
+                const groupPath = `@${elementType}`;
+                // e.g., @DomainModels$Entity[Name='Account']['generalization']
+                const groupPathWithName = elementList.length === 1 ? `@${elementType}[Name='${elementList[0].name}']` : groupPath;
+
+                return (
+                  <CollapsibleSection key={elementType} title={elementType} count={elementList.length} path={groupPath}>
+                    {elementList.map((el) => {
+                      const hasName = el.name && !el.name.startsWith('[');
+                      // e.g., @DomainModels$Entity[Name='Account']
+                      const elIdentifier = hasName ? `[Name='${el.name}']` : `[${el.name.replace(/[\[\]]/g, '')}]`;
+                      const elPath = `${groupPath}${elIdentifier}`;
+                      return <PropertyNode key={el.id} node={el} level={1} parentPath={elPath} />;
+                    })}
+                  </CollapsibleSection>
+                );
+              })
+            ) : <p className="text-xs text-gray-400 italic">No internal elements found.</p>}
+          </CollapsibleSection>
+
+          <CollapsibleSection title="Properties" count={properties.length} defaultOpen={true}>
+            {properties.length > 0 ? (
+              <div className="w-full text-left text-xs">
+                <div className="border-b border-t flex bg-gray-50 sticky top-0">
+                  <div className="font-semibold p-1 w-2/5 pl-8">Name</div>
+                  <div className="font-semibold p-1 w-2/5">Value</div>
+                  <div className="font-semibold p-1 w-1/5">Type</div>
+                </div>
+                <div>
+                  {properties.map(prop => <PropertyNode key={prop.id} node={prop} parentPath="@" />)}
+                </div>
+              </div>
+            ) : <p className="text-xs text-gray-400 italic">No properties found.</p>}
+          </CollapsibleSection>
+        </div>
+      );
+    }
+
+    function TreeNode({ node, onSelect, selectedNodeId, level = 0, parentPath = '' }) {
+      const [isExpanded, setIsExpanded] = useState(false);
+      const [children, setChildren] = useState([]);
+      const [isLoading, setIsLoading] = useState(false);
+
+      const currentPath = useMemo(() => {
+        const namePart = node.name ? `[Name='${node.name}']` : `[${node.index ?? 0}]`;
+        if (node.isUnit) {
+          return `${parentPath}/${node.type}${namePart}`;
+        }
+        return `${parentPath}/${node.type}${namePart}`;
+      }, [node, parentPath]);
+
+
+      const handleToggle = async () => {
+        const nextExpandedState = !isExpanded;
+        setIsExpanded(nextExpandedState);
+        if (nextExpandedState && children.length === 0 && node.hasChildren) {
+          setIsLoading(true);
+          try {
+            const result = await rpcClient.getNodeChildren(node.id);
+            setChildren(result);
+          } catch (e) {
+            alert(`Error fetching children: ${e.message}`);
+            setIsExpanded(false);
+          } finally {
+            setIsLoading(false);
+          }
+        }
+      };
+
+      const isSelected = selectedNodeId === node.id;
+      const nodeTypeColor = node.isUnit ? "text-blue-700" : "text-gray-600";
+
+      const handleSelect = () => {
+        onSelect({ id: node.id, path: currentPath });
+      };
+
+      return (
+        <div style={{ paddingLeft: `${level * 16}px` }}>
+          <div onClick={handleSelect} className={`group-hover flex items-center p-1 rounded cursor-pointer ${isSelected ? 'bg-blue-200' : 'hover:bg-gray-200'}`}>
+            <button onClick={(e) => { e.stopPropagation(); handleToggle(); }} className="w-5 h-5 text-center text-gray-500 mr-1 flex-shrink-0" disabled={!node.hasChildren}>
+              {node.hasChildren ? (isExpanded ? '▼' : '►') : <span className="inline-block w-2"></span>}
+            </button>
+            <div className="flex-grow overflow-hidden flex items-center">
+              <span className="font-semibold truncate">{node.name}</span>
+              <span className={`ml-2 text-xs truncate ${nodeTypeColor}`}>({node.type})</span>
+            </div>
+            <CopyButton textToCopy={currentPath} />
+          </div>
+          {isExpanded && (
+            <div>
+              {isLoading && <div style={{ paddingLeft: `16px` }} className="text-gray-400 italic">Loading...</div>}
+              {children.map(child => <TreeNode key={child.id} node={child} onSelect={onSelect} selectedNodeId={selectedNodeId} level={level + 1} parentPath={currentPath} />)}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    function App() {
+      const [rootNodes, setRootNodes] = useState([]);
+      const [selectedNode, setSelectedNode] = useState(null);
+      const [detailsLoading, setDetailsLoading] = useState(false);
+
+      useEffect(() => { rpcClient.getNodeChildren('root').then(setRootNodes); }, []);
+
+      const handleSelectNode = useCallback((nodeInfo) => {
+        if (selectedNode && nodeInfo.id === selectedNode.id) return;
+
+        const newNodeState = { id: nodeInfo.id, path: nodeInfo.path, details: null };
+        setSelectedNode(newNodeState);
+        setDetailsLoading(true);
+
+        rpcClient.getNodeDetails(nodeInfo.id)
+          .then(details => {
+            setSelectedNode({ ...newNodeState, details });
+          })
+          .catch(e => alert(`Error getting details: ${e.message}`))
+          .finally(() => setDetailsLoading(false));
+      }, [selectedNode]);
+
+      return (
+        <div className="flex h-screen w-screen text-gray-800">
+          <div className="w-1/3 h-full border-r bg-white overflow-y-auto p-2">
+            <h1 className="text-xl font-bold p-2">Mendix Model Browser</h1>
+            {rootNodes.map(node => (
+              <TreeNode key={node.id} node={node} onSelect={handleSelectNode} selectedNodeId={selectedNode?.id} parentPath="/" />
+            ))}
+          </div>
+          <div className="w-2/3 h-full overflow-hidden">
+            <InspectorPanel selectedNode={selectedNode} loading={detailsLoading} />
+          </div>
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('app'));
+    root.render(<App />);
+
+  </script>
+</body>
+
+</html>
