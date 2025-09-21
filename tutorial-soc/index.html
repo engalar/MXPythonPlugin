@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <script src="assets/tailwindcss.js"></script>
+</head>
+
+<body class="bg-gray-100 font-sans">
+    <div id="app"></div>
+
+    <script src="assets/babel.min.js"></script>
+    <script type="text/babel">
+        const { React, ReactDOM, redi, rediReact } = globalThis.__tmp;
+        delete globalThis.__tmp;
+
+        const { Inject, Injector, LookUp, Many, Optional, Quantity, RediError, Self, SkipSelf, WithNew, createIdentifier, forwardRef, isAsyncDependencyItem, isAsyncHook, isClassDependencyItem, isCtor, isDisposable, isFactoryDependencyItem, isValueDependencyItem, setDependencies } = redi;
+        const { RediConsumer, RediContext, RediProvider, WithDependency, connectDependencies, connectInjector, useDependency, useInjector, useObservable, useUpdateBinder } = rediReact;
+        const { useState, useEffect, useReducer } = React;
+
+        // ===================================================================
+        // 1. STATE MANAGEMENT (Concern: Application State)
+        // This service holds the state and provides methods to update it.
+        // It also allows components to subscribe to changes.
+        // ===================================================================
+        class MessageStore {
+            constructor() {
+                this.messages = [];
+                this.listeners = new Set();
+            }
+
+            // Method to add a message and notify all subscribers
+            addMessage(message) {
+                this.messages = [...this.messages, message];
+                this.notify();
+            }
+
+            // Allow UI components to subscribe to state changes
+            subscribe(listener) {
+                this.listeners.add(listener);
+                // Return an unsubscribe function for cleanup
+                return () => this.listeners.delete(listener);
+            }
+
+            // Notify all subscribed listeners that the state has changed
+            notify() {
+                this.listeners.forEach(listener => listener());
+            }
+        }
+
+        // ===================================================================
+        // 2. COMMUNICATION SERVICE (Concern: Backend Communication)
+        // This service handles the low-level details of sending and receiving
+        // messages. It follows the Dependency Inversion Principle.
+        // ===================================================================
+
+        // 2.1. Define the Abstraction (the "Interface")
+        const IMessageService = createIdentifier('IMessageService');
+
+        // 2.2. Create the Concrete Implementation
+        class BrowserMessageService {
+            // It depends on the MessageStore to update the state
+            constructor(messageStore) {
+                this.messageStore = messageStore;
+                // Start listening for messages as soon as the service is created
+                this.initializeListener();
+            }
+
+            // Implement the IMessageService's 'sendMessage' contract
+            sendMessage(content) {
+                const messageObject = {
+                    timestamp: new Date().toISOString(),
+                    content: content,
+                    sender: 'frontend'
+                };
+                window.parent.sendMessage("frontend:message", messageObject);
+            }
+
+            // Private method to set up the event listener
+            initializeListener() {
+                window.addEventListener('message', this.handleBackendResponse);
+            }
+
+            // This method is bound to the class instance to maintain `this` context
+            handleBackendResponse = (event) => {
+                if (event.data && event.data.type === 'backendResponse') {
+                    try {
+                        const payload = JSON.parse(event.data.data);
+                        // Instead of setting state directly, it tells the store to add a message
+                        this.messageStore.addMessage(payload);
+                    } catch (error) {
+                        console.error("Error parsing backend response:", error);
+                    }
+                }
+            };
+
+            // Cleanup: Implement IDisposable to remove the listener when the injector is destroyed
+            dispose() {
+                window.removeEventListener('message', this.handleBackendResponse);
+                console.log('BrowserMessageService disposed and listener removed.');
+            }
+        }
+
+        // Tell the IOC container that the first constructor argument of
+        // BrowserMessageService is the MessageStore.
+        setDependencies(BrowserMessageService, [MessageStore]);
+
+
+        // ===================================================================
+        // 3. UI COMPONENT (Concern: Presentation)
+        // The component is now "dumb". It only knows how to display data and
+        // delegate user actions to the appropriate services.
+        // ===================================================================
+        const App = connectDependencies(() => {
+            const [inputValue, setInputValue] = useState('');
+
+            // Get dependencies from the IOC container
+            const messageStore = useDependency(MessageStore);
+            const messageService = useDependency(IMessageService);
+
+            // A simple hook to force re-render when the store notifies of a change
+            const [, forceUpdate] = useReducer(x => x + 1, 0);
+            useEffect(() => {
+                // Subscribe to the store on mount, and unsubscribe on unmount
+                const unsubscribe = messageStore.subscribe(forceUpdate);
+                return () => unsubscribe();
+            }, [messageStore]); // Re-subscribe if the store instance ever changes
+
+            const handleSend = () => {
+                if (inputValue.trim() === '') return;
+                messageService.sendMessage(inputValue);
+                setInputValue(''); // Clear the input field
+            };
+
+            // The component's JSX is now cleaner and reads from the store
+            return (
+                <div className="p-4 max-w-2xl mx-auto bg-white shadow-lg rounded-lg mt-8">
+                    <h1 className="text-3xl font-bold text-gray-800 mb-6">tutorial-soc</h1>
+
+                    <div className="flex mb-6">
+                        <input
+                            type="text"
+                            className="flex-grow p-3 border border-gray-300 rounded-l-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-700"
+                            value={inputValue}
+                            onChange={(e) => setInputValue(e.target.value)}
+                            onKeyPress={(e) => {
+                                if (e.key === 'Enter') {
+                                    handleSend();
+                                }
+                            }}
+                            placeholder="Type a message to send to the backend..."
+                        />
+                        <button
+                            onClick={handleSend}
+                            className="px-6 py-3 bg-blue-600 text-white font-semibold rounded-r-lg hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 transition duration-200"
+                        >
+                            Send
+                        </button>
+                    </div>
+
+                    <div>
+                        <h2 className="text-2xl font-semibold text-gray-800 mb-3">Received from Backend:</h2>
+                        {messageStore.messages.length === 0 ? (
+                            <p className="text-gray-600 italic">No messages received yet. Send something!</p>
+                        ) : (
+                            <div className="bg-gray-50 p-4 rounded-lg border border-gray-200 h-64 overflow-y-auto">
+                                {messageStore.messages.map((msg, index) => (
+                                    <div key={index} className="mb-3 p-3 bg-white rounded-md shadow-sm last:mb-0">
+                                        <pre className="text-sm text-gray-800 whitespace-pre-wrap font-mono">
+                                            {JSON.stringify(msg, null, 2)}
+                                        </pre>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+                </div>
+            );
+        }, [
+            // ===============================================================
+            // 4. IOC CONTAINER CONFIGURATION
+            // Define how services are provided.
+            // ===============================================================
+
+            // Register MessageStore as a singleton for the app
+            [MessageStore],
+
+            // Register that whenever someone asks for `IMessageService`,
+            // they should receive an instance of `BrowserMessageService`.
+            [IMessageService, { useClass: BrowserMessageService }]
+        ]);
+
+        const root = ReactDOM.createRoot(document.getElementById('app'));
+        root.render(<App />);
+    </script>
+    <script type="module">
+        import * as React from "https://esm.sh/react";
+        import ReactDOM from "https://esm.sh/react-dom/client";
+        import * as redi from "https://esm.sh/@wendellhu/redi";
+        import * as rediReact from "https://esm.sh/@wendellhu/redi/react-bindings";
+        window.__tmp = { React, ReactDOM, redi, rediReact };
+    </script>
+</body>
+
+</html>
