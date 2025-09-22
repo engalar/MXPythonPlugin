@@ -3,5 +3,10 @@
   "author": null,
   "email": null,
   "ui": "index.html",
-  "plugin": "main.py"
+  "plugin": "main.py",
+  "home": "https://gist.github.com/engalar/536df8e04cd5574946a62414abb12ad8",
+  "deps": [
+    "pythonnet",
+    "dependency-injector"
+  ]
 }

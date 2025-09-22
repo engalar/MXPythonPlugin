@@ -1,16 +1,10 @@
-<!-- gh gist edit 536df8e04cd5574946a62414abb12ad8 .\index.html -f index.html -->
 <!DOCTYPE html>
 <html lang="en">
 
 <head>
   <meta charset="UTF-8">
-  <title>Mendix Model Browser</title>
-  <script src="assets/react.development.js"></script>
-  <script src="assets/react-dom.development.js"></script>
+  <title>Mendix Model Browser (RxJS Refactor)</title>
   <script src="assets/tailwindcss.js"></script>
-  <script src="assets/babel.min.js"></script>
-  <script src="assets/vconsole.min.js"></script>
-  <script>new VConsole();</script>
   <style>
     .copy-icon {
       opacity: 0.2;
@@ -66,20 +60,31 @@
 <body class="bg-gray-100 font-sans text-sm">
   <div id="app"></div>
 
+  <script src="assets/babel.min.js"></script>
   <script type="text/babel">
-    const { useState, useEffect, useCallback, useMemo } = React;
+    const { React, ReactDOM, redi, rediReact, rxjs } = globalThis.__tmp;
+    delete globalThis.__tmp;
 
-    // --- 1. RPC Client ---
+    const { Inject, Injector, Many, setDependencies, createIdentifier } = redi;
+    const { RediProvider, connectDependencies, useDependency, useInjector, useUpdateBinder } = rediReact;
+    const { useState, useEffect, useCallback, useMemo, useRef, Fragment } = React;
+    const { Subject } = rxjs; // Import Subject from RxJS
+
+    // ===================================================================
+    // 1. SERVICES (Separated Concerns: Communication & State)
+    // ===================================================================
+
+    // 1.1. COMMUNICATION SERVICE (Concern: Backend RPC) - Unchanged
+    const IMendixRpcClient = createIdentifier('IMendixRpcClient');
     class MendixRpcClient {
       constructor() {
         this.requestId = 0;
         this.pendingRequests = new Map();
-        window.addEventListener('message', (event) => {
-          if (event.data.type === 'backendResponse') this.handleResponse(event.data.data);
-        });
+        window.addEventListener('message', this.handleResponse);
       }
-      handleResponse(response) {
-        const data = typeof response === 'string' ? JSON.parse(response) : response;
+      handleResponse = (event) => {
+        if (event.data.type !== 'backendResponse') return;
+        const data = typeof event.data.data === 'string' ? JSON.parse(event.data.data) : event.data.data;
         const pendingRequest = this.pendingRequests.get(data.requestId);
         if (pendingRequest) {
           this.pendingRequests.delete(data.requestId);
@@ -97,29 +102,74 @@
       getNodeChildren(nodeId) { return this.call('getNodeChildren', { nodeId }); }
       getNodeDetails(nodeId) { return this.call('getNodeDetails', { nodeId }); }
       getPropertyChildren(propertyId) { return this.call('getPropertyChildren', { propertyId }); }
+      dispose() { window.removeEventListener('message', this.handleResponse); }
     }
-    const rpcClient = new MendixRpcClient();
 
-    // --- Helper function for copying to clipboard ---
+    // 1.2. STATE MANAGEMENT SERVICE (Concern: Application State) - Refactored with RxJS
+    class AppState {
+      // Use a private RxJS Subject to broadcast updates.
+      #update$ = new Subject();
+
+      constructor(rpcClient) {
+        this.rpcClient = rpcClient;
+        this.rootNodes = [];
+        this.selectedNode = null;
+        this.isDetailsLoading = false;
+        this.loadRootNodes();
+      }
+
+      // Expose the subject as an Observable for components to subscribe to.
+      // This prevents external code from calling .next() on our subject.
+      get updates() {
+        return this.#update$.asObservable();
+      }
+
+      async loadRootNodes() {
+        this.rootNodes = await this.rpcClient.getNodeChildren('root');
+        this.#update$.next(); // Broadcast that state has changed
+      }
+
+      async selectNode(nodeInfo) {
+        if (this.selectedNode && nodeInfo.id === this.selectedNode.id) return;
+
+        this.isDetailsLoading = true;
+        this.selectedNode = { id: nodeInfo.id, path: nodeInfo.path, details: null };
+        this.#update$.next(); // Broadcast loading state change
+
+        try {
+          const details = await this.rpcClient.getNodeDetails(nodeInfo.id);
+          if (this.selectedNode && this.selectedNode.id === nodeInfo.id) {
+            this.selectedNode.details = details;
+          }
+        } catch (e) {
+          alert(`Error getting details: ${e.message}`);
+          this.selectedNode = null;
+        } finally {
+          this.isDetailsLoading = false;
+          this.#update$.next(); // Broadcast final state change
+        }
+      }
+    }
+    setDependencies(AppState, [IMendixRpcClient]);
+
+
+    // ===================================================================
+    // 2. UI COMPONENTS (Correctly using useUpdateBinder)
+    // ===================================================================
+
+    // --- Helper Components (Largely Unchanged) ---
     function copyToClipboard(text, tooltipRef) {
       navigator.clipboard.writeText(text).then(() => {
         if (tooltipRef && tooltipRef.current) {
           const originalText = tooltipRef.current.innerText;
           tooltipRef.current.innerText = 'Copied!';
-          setTimeout(() => {
-            tooltipRef.current.innerText = originalText;
-          }, 1500);
+          setTimeout(() => { tooltipRef.current.innerText = originalText; }, 1500);
         }
-      }).catch(err => {
-        console.error('Failed to copy: ', err);
-        alert('Failed to copy text to clipboard.');
-      });
+      }).catch(err => console.error('Failed to copy: ', err));
     }
 
-    // --- 2. UI Components ---
-
     function CopyButton({ textToCopy, tooltipText = "Copy path" }) {
-      const tooltipRef = React.useRef(null);
+      const tooltipRef = useRef(null);
       return (
         <div className="tooltip" onClick={(e) => { e.stopPropagation(); copyToClipboard(textToCopy, tooltipRef); }}>
           <span className="copy-icon ml-2">
@@ -135,10 +185,7 @@
       return (
         <div className="mb-4">
           <h3 onClick={() => setIsOpen(!isOpen)} className="group-hover font-semibold text-gray-700 border-b pb-1 mb-2 cursor-pointer flex justify-between items-center select-none">
-            <span className="flex items-center">
-              {title} ({count})
-              {path && <CopyButton textToCopy={path} />}
-            </span>
+            <span className="flex items-center">{title} ({count}) {path && <CopyButton textToCopy={path} />}</span>
             <span className="text-gray-500 text-xs transform transition-transform">{isOpen ? '▼' : '►'}</span>
           </h3>
           {isOpen && children}
@@ -146,10 +193,13 @@
       );
     }
 
+    // --- Core Components Refactored ---
+
     function PropertyNode({ node, level = 0, parentPath = '' }) {
       const [isExpanded, setIsExpanded] = useState(false);
       const [children, setChildren] = useState([]);
       const [isLoading, setIsLoading] = useState(false);
+      const rpcClient = useDependency(IMendixRpcClient); // Injected dependency
 
       const handleToggle = async () => {
         if (!node.hasChildren) return;
@@ -158,8 +208,7 @@
         if (nextExpandedState && children.length === 0) {
           setIsLoading(true);
           try {
-            let result = await rpcClient.getPropertyChildren(node.id);
-            setChildren(result);
+            setChildren(await rpcClient.getPropertyChildren(node.id));
           } catch (e) {
             alert(`Error fetching property children: ${e.message}`);
             setIsExpanded(false);
@@ -168,29 +217,15 @@
           }
         }
       };
-
-      const isResolvableElement = node.valueType === 'ResolvableElement';
-
-      const currentPath = useMemo(() => {
-        // e.g., @['entities'][0] or @['entities'][Name='Account']
-        if (node.name.startsWith('[')) {
-          return `${parentPath}${node.name}`;
-        }
-        // e.g., @['entities'][Name='Account']['generalization']
-        return `${parentPath}['${node.name}']`;
-      }, [parentPath, node.name]);
+      const currentPath = useMemo(() => node.name.startsWith('[') ? `${parentPath}${node.name}` : `${parentPath}['${node.name}']`, [parentPath, node.name]);
 
       return (
         <div className="border-b hover:bg-gray-50 text-xs">
           <div className="group-hover flex items-center" style={{ paddingLeft: `${level * 16}px` }} onClick={handleToggle}>
             <div className={`p-1 flex items-center flex-grow ${node.hasChildren ? 'cursor-pointer' : ''}`}>
-              <span className="w-5 h-5 text-center text-gray-500 mr-1 flex-shrink-0">
-                {node.hasChildren ? (isExpanded ? '▼' : '►') : <span className="inline-block w-3"></span>}
-              </span>
+              <span className="w-5 h-5 text-center text-gray-500 mr-1 flex-shrink-0">{node.hasChildren ? (isExpanded ? '▼' : '►') : <span className="inline-block w-3"></span>}</span>
               <span className="font-mono text-gray-600 break-all w-2/5 pr-2">{node.name}</span>
-              <span className={`break-all w-2/5 pr-2 ${isResolvableElement ? 'italic text-purple-700' : ''}`}>
-                {node.value}
-              </span>
+              <span className={`break-all w-2/5 pr-2 ${node.valueType === 'ResolvableElement' ? 'italic text-purple-700' : ''}`}>{node.value}</span>
               <span className="text-gray-500 break-all w-1/5">{node.type}</span>
             </div>
             <CopyButton textToCopy={currentPath} />
@@ -205,46 +240,39 @@
       );
     }
 
-    function InspectorPanel({ selectedNode, loading }) {
-      if (loading) return <div className="p-4 text-gray-500">Loading details...</div>;
+    function InspectorPanel() {
+      const appState = useDependency(AppState);
+      // CORRECT: useUpdateBinder now receives a real RxJS Observable.
+      useUpdateBinder(appState.updates);
+
+      const { selectedNode, isDetailsLoading } = appState;
+      if (isDetailsLoading) return <div className="p-4 text-gray-500">Loading details...</div>;
       if (!selectedNode || !selectedNode.details) return <div className="p-4 text-gray-500">Select a unit to see its details.</div>;
 
       const { details } = selectedNode;
       const { name, type, properties, elements } = details;
-
-      const groupedElements = elements.reduce((acc, el) => {
-        (acc[el.type] = acc[el.type] || []).push(el);
-        return acc;
-      }, {});
+      const groupedElements = elements.reduce((acc, el) => { (acc[el.type] = acc[el.type] || []).push(el); return acc; }, {});
 
       return (
         <div className="p-3 bg-white h-full overflow-y-auto">
           <h2 className="text-lg font-bold text-gray-800 break-all">{name}</h2>
           <p className="text-xs text-blue-600 bg-blue-100 rounded px-2 py-0.5 inline-block mb-4">{type}</p>
-
           <CollapsibleSection title="Internal Elements" count={elements.length} defaultOpen={false}>
             {elements.length > 0 ? (
               Object.entries(groupedElements).map(([elementType, elementList]) => {
-                // e.g., @DomainModels$Entity
                 const groupPath = `@${elementType}`;
-                // e.g., @DomainModels$Entity[Name='Account']['generalization']
-                const groupPathWithName = elementList.length === 1 ? `@${elementType}[Name='${elementList[0].name}']` : groupPath;
-
                 return (
                   <CollapsibleSection key={elementType} title={elementType} count={elementList.length} path={groupPath}>
                     {elementList.map((el) => {
                       const hasName = el.name && !el.name.startsWith('[');
-                      // e.g., @DomainModels$Entity[Name='Account']
                       const elIdentifier = hasName ? `[Name='${el.name}']` : `[${el.name.replace(/[\[\]]/g, '')}]`;
-                      const elPath = `${groupPath}${elIdentifier}`;
-                      return <PropertyNode key={el.id} node={el} level={1} parentPath={elPath} />;
+                      return <PropertyNode key={el.id} node={el} level={1} parentPath={`${groupPath}${elIdentifier}`} />;
                     })}
                   </CollapsibleSection>
                 );
               })
             ) : <p className="text-xs text-gray-400 italic">No internal elements found.</p>}
           </CollapsibleSection>
-
           <CollapsibleSection title="Properties" count={properties.length} defaultOpen={true}>
             {properties.length > 0 ? (
               <div className="w-full text-left text-xs">
@@ -253,9 +281,7 @@
                   <div className="font-semibold p-1 w-2/5">Value</div>
                   <div className="font-semibold p-1 w-1/5">Type</div>
                 </div>
-                <div>
-                  {properties.map(prop => <PropertyNode key={prop.id} node={prop} parentPath="@" />)}
-                </div>
+                <div>{properties.map(prop => <PropertyNode key={prop.id} node={prop} parentPath="@" />)}</div>
               </div>
             ) : <p className="text-xs text-gray-400 italic">No properties found.</p>}
           </CollapsibleSection>
@@ -263,19 +289,18 @@
       );
     }
 
-    function TreeNode({ node, onSelect, selectedNodeId, level = 0, parentPath = '' }) {
+    function TreeNode({ node, level = 0, parentPath = '' }) {
       const [isExpanded, setIsExpanded] = useState(false);
       const [children, setChildren] = useState([]);
       const [isLoading, setIsLoading] = useState(false);
+      const rpcClient = useDependency(IMendixRpcClient);
+      const appState = useDependency(AppState);
 
-      const currentPath = useMemo(() => {
-        const namePart = node.name ? `[Name='${node.name}']` : `[${node.index ?? 0}]`;
-        if (node.isUnit) {
-          return `${parentPath}/${node.type}${namePart}`;
-        }
-        return `${parentPath}/${node.type}${namePart}`;
-      }, [node, parentPath]);
+      // CORRECT: This component will now re-render when the selected node changes.
+      useUpdateBinder(appState.updates);
 
+      const { selectedNode } = appState;
+      const currentPath = useMemo(() => `${parentPath}/${node.type}[Name='${node.name}']`, [node, parentPath]);
 
       const handleToggle = async () => {
         const nextExpandedState = !isExpanded;
@@ -283,8 +308,7 @@
         if (nextExpandedState && children.length === 0 && node.hasChildren) {
           setIsLoading(true);
           try {
-            const result = await rpcClient.getNodeChildren(node.id);
-            setChildren(result);
+            setChildren(await rpcClient.getNodeChildren(node.id));
           } catch (e) {
             alert(`Error fetching children: ${e.message}`);
             setIsExpanded(false);
@@ -294,12 +318,8 @@
         }
       };
 
-      const isSelected = selectedNodeId === node.id;
-      const nodeTypeColor = node.isUnit ? "text-blue-700" : "text-gray-600";
-
-      const handleSelect = () => {
-        onSelect({ id: node.id, path: currentPath });
-      };
+      const isSelected = selectedNode?.id === node.id;
+      const handleSelect = () => appState.selectNode({ id: node.id, path: currentPath });
 
       return (
         <div style={{ paddingLeft: `${level * 16}px` }}>
@@ -309,60 +329,67 @@
             </button>
             <div className="flex-grow overflow-hidden flex items-center">
               <span className="font-semibold truncate">{node.name}</span>
-              <span className={`ml-2 text-xs truncate ${nodeTypeColor}`}>({node.type})</span>
+              <span className={`ml-2 text-xs truncate ${node.isUnit ? "text-blue-700" : "text-gray-600"}`}>({node.type})</span>
             </div>
             <CopyButton textToCopy={currentPath} />
           </div>
           {isExpanded && (
             <div>
               {isLoading && <div style={{ paddingLeft: `16px` }} className="text-gray-400 italic">Loading...</div>}
-              {children.map(child => <TreeNode key={child.id} node={child} onSelect={onSelect} selectedNodeId={selectedNodeId} level={level + 1} parentPath={currentPath} />)}
+              {children.map(child => <TreeNode key={child.id} node={child} level={level + 1} parentPath={currentPath} />)}
             </div>
           )}
         </div>
       );
     }
 
-    function App() {
-      const [rootNodes, setRootNodes] = useState([]);
-      const [selectedNode, setSelectedNode] = useState(null);
-      const [detailsLoading, setDetailsLoading] = useState(false);
-
-      useEffect(() => { rpcClient.getNodeChildren('root').then(setRootNodes); }, []);
-
-      const handleSelectNode = useCallback((nodeInfo) => {
-        if (selectedNode && nodeInfo.id === selectedNode.id) return;
-
-        const newNodeState = { id: nodeInfo.id, path: nodeInfo.path, details: null };
-        setSelectedNode(newNodeState);
-        setDetailsLoading(true);
-
-        rpcClient.getNodeDetails(nodeInfo.id)
-          .then(details => {
-            setSelectedNode({ ...newNodeState, details });
-          })
-          .catch(e => alert(`Error getting details: ${e.message}`))
-          .finally(() => setDetailsLoading(false));
-      }, [selectedNode]);
+    function TreeView() {
+      const appState = useDependency(AppState);
+      // CORRECT: This component will re-render when the rootNodes are loaded.
+      useUpdateBinder(appState.updates);
 
       return (
-        <div className="flex h-screen w-screen text-gray-800">
-          <div className="w-1/3 h-full border-r bg-white overflow-y-auto p-2">
-            <h1 className="text-xl font-bold p-2">Mendix Model Browser</h1>
-            {rootNodes.map(node => (
-              <TreeNode key={node.id} node={node} onSelect={handleSelectNode} selectedNodeId={selectedNode?.id} parentPath="/" />
-            ))}
-          </div>
-          <div className="w-2/3 h-full overflow-hidden">
-            <InspectorPanel selectedNode={selectedNode} loading={detailsLoading} />
-          </div>
+        <div className="w-1/3 h-full border-r bg-white overflow-y-auto p-2">
+          <h1 className="text-xl font-bold p-2">Mendix Model Browser</h1>
+          {appState.rootNodes.map(node => (
+            <TreeNode key={node.id} node={node} parentPath="/" />
+          ))}
         </div>
       );
     }
 
-    const root = ReactDOM.createRoot(document.getElementById('app'));
-    root.render(<App />);
+    // ===================================================================
+    // 3. THE MAIN APP COMPONENT (THE "SHELL")
+    // ===================================================================
+    const App = () => {
+      return (
+        <div className="flex h-screen w-screen text-gray-800">
+          <TreeView />
+          <div className="w-2/3 h-full overflow-hidden">
+            <InspectorPanel />
+          </div>
+        </div>
+      );
+    };
 
+    // ===============================================================
+    // 4. IOC CONTAINER CONFIGURATION & APP ROOT
+    // ===============================================================
+    const AppWithDependencies = connectDependencies(App, [
+      [IMendixRpcClient, { useClass: MendixRpcClient }],
+      [AppState],
+    ]);
+
+    const root = ReactDOM.createRoot(document.getElementById('app'));
+    root.render(<AppWithDependencies />);
+  </script>
+  <script type="module">
+    import * as React from "https://esm.sh/react";
+    import ReactDOM from "https://esm.sh/react-dom/client";
+    import * as redi from "https://esm.sh/@wendellhu/redi";
+    import * as rediReact from "https://esm.sh/@wendellhu/redi/react-bindings";
+    import * as rxjs from "https://esm.sh/rxjs"; // <-- Added RxJS import
+    window.__tmp = { React, ReactDOM, redi, rediReact, rxjs }; // <-- Made RxJS available to the babel script
   </script>
 </body>
 
