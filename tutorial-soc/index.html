@@ -16,182 +16,184 @@
 
         const { Inject, Injector, LookUp, Many, Optional, Quantity, RediError, Self, SkipSelf, WithNew, createIdentifier, forwardRef, isAsyncDependencyItem, isAsyncHook, isClassDependencyItem, isCtor, isDisposable, isFactoryDependencyItem, isValueDependencyItem, setDependencies } = redi;
         const { RediConsumer, RediContext, RediProvider, WithDependency, connectDependencies, connectInjector, useDependency, useInjector, useObservable, useUpdateBinder } = rediReact;
-        const { useState, useEffect, useReducer } = React;
+        const { useState, useEffect, useReducer, Fragment } = React;
 
         // ===================================================================
-        // 1. STATE MANAGEMENT (Concern: Application State)
-        // This service holds the state and provides methods to update it.
-        // It also allows components to subscribe to changes.
+        // 1. STATE & COMMUNICATION SERVICES (Unchanged)
         // ===================================================================
+
+        // 1.1. STATE MANAGEMENT (Concern: Application State)
         class MessageStore {
-            constructor() {
-                this.messages = [];
-                this.listeners = new Set();
-            }
-
-            // Method to add a message and notify all subscribers
-            addMessage(message) {
-                this.messages = [...this.messages, message];
-                this.notify();
-            }
-
-            // Allow UI components to subscribe to state changes
-            subscribe(listener) {
-                this.listeners.add(listener);
-                // Return an unsubscribe function for cleanup
-                return () => this.listeners.delete(listener);
-            }
-
-            // Notify all subscribed listeners that the state has changed
-            notify() {
-                this.listeners.forEach(listener => listener());
-            }
+            constructor() { this.messages = []; this.listeners = new Set(); }
+            addMessage(message) { this.messages = [...this.messages, message]; this.notify(); }
+            subscribe(listener) { this.listeners.add(listener); return () => this.listeners.delete(listener); }
+            notify() { this.listeners.forEach(listener => listener()); }
         }
 
-        // ===================================================================
-        // 2. COMMUNICATION SERVICE (Concern: Backend Communication)
-        // This service handles the low-level details of sending and receiving
-        // messages. It follows the Dependency Inversion Principle.
-        // ===================================================================
-
-        // 2.1. Define the Abstraction (the "Interface")
+        // 1.2. COMMUNICATION SERVICE (Concern: Backend Communication)
         const IMessageService = createIdentifier('IMessageService');
-
-        // 2.2. Create the Concrete Implementation
         class BrowserMessageService {
-            // It depends on the MessageStore to update the state
             constructor(messageStore) {
                 this.messageStore = messageStore;
-                // Start listening for messages as soon as the service is created
                 this.initializeListener();
             }
-
-            // Implement the IMessageService's 'sendMessage' contract
             sendMessage(content) {
-                const messageObject = {
-                    timestamp: new Date().toISOString(),
-                    content: content,
-                    sender: 'frontend'
-                };
+                const messageObject = { timestamp: new Date().toISOString(), content, sender: 'frontend' };
                 window.parent.sendMessage("frontend:message", messageObject);
             }
-
-            // Private method to set up the event listener
-            initializeListener() {
-                window.addEventListener('message', this.handleBackendResponse);
-            }
-
-            // This method is bound to the class instance to maintain `this` context
+            initializeListener() { window.addEventListener('message', this.handleBackendResponse); }
             handleBackendResponse = (event) => {
                 if (event.data && event.data.type === 'backendResponse') {
                     try {
                         const payload = JSON.parse(event.data.data);
-                        // Instead of setting state directly, it tells the store to add a message
                         this.messageStore.addMessage(payload);
-                    } catch (error) {
-                        console.error("Error parsing backend response:", error);
-                    }
+                    } catch (e) { console.error("Error parsing backend response:", e); }
                 }
             };
-
-            // Cleanup: Implement IDisposable to remove the listener when the injector is destroyed
-            dispose() {
-                window.removeEventListener('message', this.handleBackendResponse);
-                console.log('BrowserMessageService disposed and listener removed.');
-            }
+            dispose() { window.removeEventListener('message', this.handleBackendResponse); }
         }
-
-        // Tell the IOC container that the first constructor argument of
-        // BrowserMessageService is the MessageStore.
         setDependencies(BrowserMessageService, [MessageStore]);
 
 
         // ===================================================================
-        // 3. UI COMPONENT (Concern: Presentation)
-        // The component is now "dumb". It only knows how to display data and
-        // delegate user actions to the appropriate services.
+        // 2. NEW: VIEW ABSTRACTION AND MANAGEMENT
+        // This is the core of the new architecture.
         // ===================================================================
-        const App = connectDependencies(() => {
+
+        // 2.1. Define an identifier for any component that can be rendered as a "View".
+        const IView = createIdentifier('IView');
+
+        // 2.2. Create a service to manage and provide these views.
+        class ViewManagementService {
+            // This service depends on an array of all registered `IView` components.
+            constructor(views) {
+                // The IoC container will inject all components registered with the
+                // `IView` identifier here.
+                this.views = views;
+            }
+
+            // A simple getter to expose the registered view components.
+            getViews() {
+                return this.views;
+            }
+        }
+        // Tell `redi` that the constructor's first argument is a collection
+        // of all dependencies that match the `IView` identifier.
+        setDependencies(ViewManagementService, [[new Many, IView]]); // export type FactoryDep<T> = | [...FactoryDepModifier[], DependencyIdentifier<T>] | DependencyIdentifier<T>;
+
+
+        // ===================================================================
+        // 3. UI COMPONENTS (SPLIT INTO INDEPENDENT VIEWS)
+        // Each view is a self-contained Functional Component that uses hooks
+        // to get its own dependencies from the container.
+        // ===================================================================
+
+        // 3.1. The View for Sending Messages
+        const InputView = () => {
             const [inputValue, setInputValue] = useState('');
-
-            // Get dependencies from the IOC container
-            const messageStore = useDependency(MessageStore);
             const messageService = useDependency(IMessageService);
-
-            // A simple hook to force re-render when the store notifies of a change
-            const [, forceUpdate] = useReducer(x => x + 1, 0);
-            useEffect(() => {
-                // Subscribe to the store on mount, and unsubscribe on unmount
-                const unsubscribe = messageStore.subscribe(forceUpdate);
-                return () => unsubscribe();
-            }, [messageStore]); // Re-subscribe if the store instance ever changes
 
             const handleSend = () => {
                 if (inputValue.trim() === '') return;
                 messageService.sendMessage(inputValue);
-                setInputValue(''); // Clear the input field
+                setInputValue('');
             };
 
-            // The component's JSX is now cleaner and reads from the store
             return (
-                <div className="p-4 max-w-2xl mx-auto bg-white shadow-lg rounded-lg mt-8">
-                    <h1 className="text-3xl font-bold text-gray-800 mb-6">tutorial-soc</h1>
-
-                    <div className="flex mb-6">
-                        <input
-                            type="text"
-                            className="flex-grow p-3 border border-gray-300 rounded-l-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-700"
-                            value={inputValue}
-                            onChange={(e) => setInputValue(e.target.value)}
-                            onKeyPress={(e) => {
-                                if (e.key === 'Enter') {
-                                    handleSend();
-                                }
-                            }}
-                            placeholder="Type a message to send to the backend..."
-                        />
-                        <button
-                            onClick={handleSend}
-                            className="px-6 py-3 bg-blue-600 text-white font-semibold rounded-r-lg hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 transition duration-200"
-                        >
-                            Send
-                        </button>
-                    </div>
-
-                    <div>
-                        <h2 className="text-2xl font-semibold text-gray-800 mb-3">Received from Backend:</h2>
-                        {messageStore.messages.length === 0 ? (
-                            <p className="text-gray-600 italic">No messages received yet. Send something!</p>
-                        ) : (
-                            <div className="bg-gray-50 p-4 rounded-lg border border-gray-200 h-64 overflow-y-auto">
-                                {messageStore.messages.map((msg, index) => (
-                                    <div key={index} className="mb-3 p-3 bg-white rounded-md shadow-sm last:mb-0">
-                                        <pre className="text-sm text-gray-800 whitespace-pre-wrap font-mono">
-                                            {JSON.stringify(msg, null, 2)}
-                                        </pre>
-                                    </div>
-                                ))}
-                            </div>
-                        )}
-                    </div>
+                <div className="flex mb-6">
+                    <input
+                        type="text"
+                        className="flex-grow p-3 border border-gray-300 rounded-l-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-700"
+                        value={inputValue}
+                        onChange={(e) => setInputValue(e.target.value)}
+                        onKeyPress={(e) => e.key === 'Enter' && handleSend()}
+                        placeholder="Type a message to send to the backend..."
+                    />
+                    <button
+                        onClick={handleSend}
+                        className="px-6 py-3 bg-blue-600 text-white font-semibold rounded-r-lg hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 transition duration-200"
+                    >
+                        Send
+                    </button>
                 </div>
             );
-        }, [
-            // ===============================================================
-            // 4. IOC CONTAINER CONFIGURATION
-            // Define how services are provided.
-            // ===============================================================
+        };
 
-            // Register MessageStore as a singleton for the app
+        // 3.2. The View for Displaying Received Messages
+        const MessageListView = () => {
+            const messageStore = useDependency(MessageStore);
+
+            // Hook to subscribe to the store and force re-renders on updates.
+            const [, forceUpdate] = useReducer(x => x + 1, 0);
+            useEffect(() => {
+                const unsubscribe = messageStore.subscribe(forceUpdate);
+                return () => unsubscribe();
+            }, [messageStore]);
+
+            return (
+                <div>
+                    <h2 className="text-2xl font-semibold text-gray-800 mb-3">Received from Backend:</h2>
+                    {messageStore.messages.length === 0 ? (
+                        <p className="text-gray-600 italic">No messages received yet. Send something!</p>
+                    ) : (
+                        <div className="bg-gray-50 p-4 rounded-lg border border-gray-200 h-64 overflow-y-auto">
+                            {messageStore.messages.map((msg, index) => (
+                                <div key={index} className="mb-3 p-3 bg-white rounded-md shadow-sm last:mb-0">
+                                    <pre className="text-sm text-gray-800 whitespace-pre-wrap font-mono">
+                                        {JSON.stringify(msg, null, 2)}
+                                    </pre>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
+        // ===================================================================
+        // 4. THE MAIN APP COMPONENT (THE "SHELL")
+        // The App component is now extremely simple. It just asks the
+        // ViewManagementService for the views and renders them.
+        // ===================================================================
+        const App = () => {
+            // Depend on the view manager, not the individual views.
+            const viewManager = useDependency(ViewManagementService);
+            const registeredViews = viewManager.getViews();
+
+            return (
+                <div className="p-4 max-w-2xl mx-auto bg-white shadow-lg rounded-lg mt-8">
+                    <h1 className="text-3xl font-bold text-gray-800 mb-6">tutorial-soc (View Composition)</h1>
+                    {/*
+                      Dynamically render each registered view.
+                      Each view is responsible for its own state and dependencies.
+                    */}
+                    {registeredViews.map((ViewComponent, index) => (
+                        <Fragment key={index}>
+                            <ViewComponent />
+                        </Fragment>
+                    ))}
+                </div>
+            );
+        };
+
+        // ===============================================================
+        // 5. IOC CONTAINER CONFIGURATION & APP ROOT
+        // ===============================================================
+        const AppWithDependencies = connectDependencies(App, [
+            // Register foundational services as singletons
             [MessageStore],
+            [ViewManagementService],
+            [IMessageService, { useClass: BrowserMessageService }],
 
-            // Register that whenever someone asks for `IMessageService`,
-            // they should receive an instance of `BrowserMessageService`.
-            [IMessageService, { useClass: BrowserMessageService }]
+            // Register our UI components against the `IView` identifier.
+            // The `ViewManagementService` will receive these in an array.
+            // The order here determines the render order.
+            [IView, { useValue: InputView }],
+            [IView, { useValue: MessageListView }],
         ]);
 
         const root = ReactDOM.createRoot(document.getElementById('app'));
-        root.render(<App />);
+        root.render(<AppWithDependencies />);
     </script>
     <script type="module">
         import * as React from "https://esm.sh/react";
