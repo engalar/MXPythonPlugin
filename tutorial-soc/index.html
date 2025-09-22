@@ -14,40 +14,87 @@
         const { React, ReactDOM, redi, rediReact } = globalThis.__tmp;
         delete globalThis.__tmp;
 
+        // keep unused import for redi and rediReact
         const { Inject, Injector, LookUp, Many, Optional, Quantity, RediError, Self, SkipSelf, WithNew, createIdentifier, forwardRef, isAsyncDependencyItem, isAsyncHook, isClassDependencyItem, isCtor, isDisposable, isFactoryDependencyItem, isValueDependencyItem, setDependencies } = redi;
         const { RediConsumer, RediContext, RediProvider, WithDependency, connectDependencies, connectInjector, useDependency, useInjector, useObservable, useUpdateBinder } = rediReact;
-        const { useState, useEffect, useReducer, Fragment } = React;
+        const { useState, useEffect, useReducer, Fragment, useCallback } = React;
 
         // ===================================================================
-        // 1. STATE & COMMUNICATION SERVICES (Unchanged)
+        // 1. STATE & COMMUNICATION SERVICES
         // ===================================================================
 
-        // 1.1. STATE MANAGEMENT (Concern: Application State)
+        // 1.1. STATE MANAGEMENT (Now logs RPC calls)
         class MessageStore {
-            constructor() { this.messages = []; this.listeners = new Set(); }
-            addMessage(message) { this.messages = [...this.messages, message]; this.notify(); }
+            constructor() { this.log = []; this.listeners = new Set(); }
+            addLogEntry(entry) { this.log = [entry, ...this.log]; this.notify(); }
             subscribe(listener) { this.listeners.add(listener); return () => this.listeners.delete(listener); }
             notify() { this.listeners.forEach(listener => listener()); }
         }
 
-        // 1.2. COMMUNICATION SERVICE (Concern: Backend Communication)
+        // 1.2. COMMUNICATION SERVICE (REFACTORED for RPC)
         const IMessageService = createIdentifier('IMessageService');
         class BrowserMessageService {
             constructor(messageStore) {
                 this.messageStore = messageStore;
+                this.requestId = 0;
+                this.pendingRequests = new Map();
                 this.initializeListener();
+                this.RPC_TIMEOUT = 10000; // 10 seconds
             }
-            sendMessage(content) {
-                const messageObject = { timestamp: new Date().toISOString(), content, sender: 'frontend' };
-                window.parent.sendMessage("frontend:message", messageObject);
+
+            // The core RPC 'call' method
+            async call(type, payload) {
+                const correlationId = `req-${this.requestId++}`;
+                const command = { type, payload, correlationId, timestamp: new Date().toISOString() };
+
+                this.messageStore.addLogEntry({ type: 'request', correlationId, command });
+
+                return new Promise((resolve, reject) => {
+                    // Set a timeout for the request
+                    const timeoutId = setTimeout(() => {
+                        if (this.pendingRequests.has(correlationId)) {
+                            this.pendingRequests.delete(correlationId);
+                            const error = new Error(`RPC call timed out for type '${type}'`);
+                            this.messageStore.addLogEntry({ type: 'timeout', correlationId, error: error.message });
+                            reject(error);
+                        }
+                    }, this.RPC_TIMEOUT);
+
+                    // Store the promise handlers
+                    this.pendingRequests.set(correlationId, { resolve, reject, timeoutId });
+
+                    // Send the command to the backend
+                    window.parent.sendMessage("frontend:message", command);
+                });
             }
+
             initializeListener() { window.addEventListener('message', this.handleBackendResponse); }
+
             handleBackendResponse = (event) => {
-                if (event.data && event.data.type === 'backendResponse') {
-                    try {
-                        const payload = JSON.parse(event.data.data);
-                        this.messageStore.addMessage(payload);
-                    } catch (e) { console.error("Error parsing backend response:", e); }
+                if (!(event.data && event.data.type === 'backendResponse')) return;
+                try {
+                    const response = JSON.parse(event.data.data);
+                    const { correlationId } = response;
+
+                    if (!correlationId || !this.pendingRequests.has(correlationId)) {
+                        console.warn("Received response for an unknown or timed-out request:", response);
+                        return;
+                    }
+
+                    const { resolve, reject, timeoutId } = this.pendingRequests.get(correlationId);
+                    clearTimeout(timeoutId); // Clear the timeout
+                    this.pendingRequests.delete(correlationId); // Clean up
+
+                    this.messageStore.addLogEntry({ type: 'response', correlationId, response });
+
+                    if (response.status === 'success') {
+                        resolve(response.data);
+                    } else {
+                        reject(new Error(response.message || 'An unknown backend error occurred.'));
+                    }
+                } catch (e) {
+                    console.error("Fatal error parsing backend response:", e, event.data.data);
+                    this.messageStore.addLogEntry({ type: 'error', error: "Frontend failed to parse backend response", raw: event.data.data });
                 }
             };
             dispose() { window.removeEventListener('message', this.handleBackendResponse); }
@@ -56,74 +103,95 @@
 
 
         // ===================================================================
-        // 2. NEW: VIEW ABSTRACTION AND MANAGEMENT
-        // This is the core of the new architecture.
+        // 2. VIEW ABSTRACTION AND MANAGEMENT (Unchanged)
         // ===================================================================
-
-        // 2.1. Define an identifier for any component that can be rendered as a "View".
         const IView = createIdentifier('IView');
-
-        // 2.2. Create a service to manage and provide these views.
         class ViewManagementService {
-            // This service depends on an array of all registered `IView` components.
-            constructor(views) {
-                // The IoC container will inject all components registered with the
-                // `IView` identifier here.
-                this.views = views;
-            }
-
-            // A simple getter to expose the registered view components.
-            getViews() {
-                return this.views;
-            }
+            constructor(views) { this.views = views; }
+            getViews() { return this.views; }
         }
-        // Tell `redi` that the constructor's first argument is a collection
-        // of all dependencies that match the `IView` identifier.
-        setDependencies(ViewManagementService, [[new Many, IView]]); // export type FactoryDep<T> = | [...FactoryDepModifier[], DependencyIdentifier<T>] | DependencyIdentifier<T>;
+        setDependencies(ViewManagementService, [[new Many, IView]]);
 
 
         // ===================================================================
-        // 3. UI COMPONENTS (SPLIT INTO INDEPENDENT VIEWS)
-        // Each view is a self-contained Functional Component that uses hooks
-        // to get its own dependencies from the container.
+        // 3. UI COMPONENTS (ADAPTED for Async/Await and RPC)
         // ===================================================================
 
-        // 3.1. The View for Sending Messages
-        const InputView = () => {
-            const [inputValue, setInputValue] = useState('');
+        // Reusable hook for handling RPC calls in components
+        const useRpc = () => {
             const messageService = useDependency(IMessageService);
+            const [isLoading, setIsLoading] = useState(false);
+            const [error, setError] = useState(null);
+            const [data, setData] = useState(null);
 
-            const handleSend = () => {
-                if (inputValue.trim() === '') return;
-                messageService.sendMessage(inputValue);
-                setInputValue('');
+            const execute = useCallback(async (type, payload) => {
+                setIsLoading(true);
+                setError(null);
+                setData(null);
+                try {
+                    const result = await messageService.call(type, payload);
+                    setData(result);
+                    return result;
+                } catch (err) {
+                    setError(err.message);
+                    // allow component to handle the error too
+                    throw err;
+                } finally {
+                    setIsLoading(false);
+                }
+            }, [messageService]);
+
+            return { execute, isLoading, error, data };
+        };
+
+        const InputView = () => {
+            const [inputValue, setInputValue] = useState('Hello RPC!');
+            const { execute, isLoading } = useRpc();
+
+            const handleSend = async () => {
+                if (inputValue.trim() === '' || isLoading) return;
+                try {
+                    await execute('ECHO', { content: inputValue });
+                    setInputValue(''); // Clear on success
+                } catch (e) { console.error("Echo failed:", e); }
             };
 
             return (
-                <div className="flex mb-6">
-                    <input
-                        type="text"
-                        className="flex-grow p-3 border border-gray-300 rounded-l-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-700"
-                        value={inputValue}
-                        onChange={(e) => setInputValue(e.target.value)}
-                        onKeyPress={(e) => e.key === 'Enter' && handleSend()}
-                        placeholder="Type a message to send to the backend..."
-                    />
-                    <button
-                        onClick={handleSend}
-                        className="px-6 py-3 bg-blue-600 text-white font-semibold rounded-r-lg hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 transition duration-200"
-                    >
-                        Send
-                    </button>
+                <div className="p-4 border-b border-gray-200">
+                    <h2 className="text-xl font-semibold text-gray-700 mb-2">Echo Tool (RPC)</h2>
+                    <div className="flex">
+                        <input type="text" className="flex-grow p-3 ..." value={inputValue} onChange={(e) => setInputValue(e.target.value)} disabled={isLoading} />
+                        <button onClick={handleSend} className="px-6 py-3 bg-blue-600 ... disabled:bg-gray-400" disabled={isLoading}>
+                            {isLoading ? 'Echoing...' : 'Send Echo'}
+                        </button>
+                    </div>
                 </div>
             );
         };
 
-        // 3.2. The View for Displaying Received Messages
-        const MessageListView = () => {
-            const messageStore = useDependency(MessageStore);
+        const EditorControlView = () => {
+            const { execute, isLoading, error } = useRpc();
 
-            // Hook to subscribe to the store and force re-renders on updates.
+            const handleOpenEditor = async () => {
+                try {
+                    await execute('OPEN_EDITOR', { moduleName: 'Administration', entityName: 'Account' });
+                } catch (e) { console.error("Open Editor failed:", e); }
+            };
+
+            return (
+                <div className="p-4 border-b border-gray-200">
+                    <h2 className="text-xl font-semibold text-gray-700 mb-2">Editor Control (RPC)</h2>
+                    <p className="text-sm text-gray-600 mb-3">Click to send an RPC call to open the 'Administration.Account' entity editor.</p>
+                    <button onClick={handleOpenEditor} className="w-full px-6 py-3 bg-green-600 ... disabled:bg-gray-400" disabled={isLoading}>
+                        {isLoading ? 'Requesting...' : 'Trigger TryOpenEditor'}
+                    </button>
+                    {error && <p className="text-red-600 mt-2 text-sm">{error}</p>}
+                </div>
+            );
+        };
+
+        const MessageLogView = () => {
+            const messageStore = useDependency(MessageStore);
             const [, forceUpdate] = useReducer(x => x + 1, 0);
             useEffect(() => {
                 const unsubscribe = messageStore.subscribe(forceUpdate);
@@ -131,65 +199,40 @@
             }, [messageStore]);
 
             return (
-                <div>
-                    <h2 className="text-2xl font-semibold text-gray-800 mb-3">Received from Backend:</h2>
-                    {messageStore.messages.length === 0 ? (
-                        <p className="text-gray-600 italic">No messages received yet. Send something!</p>
-                    ) : (
-                        <div className="bg-gray-50 p-4 rounded-lg border border-gray-200 h-64 overflow-y-auto">
-                            {messageStore.messages.map((msg, index) => (
-                                <div key={index} className="mb-3 p-3 bg-white rounded-md shadow-sm last:mb-0">
-                                    <pre className="text-sm text-gray-800 whitespace-pre-wrap font-mono">
-                                        {JSON.stringify(msg, null, 2)}
-                                    </pre>
+                <div className="p-4">
+                    <h2 className="text-xl font-semibold text-gray-700 mb-3">RPC Call Log:</h2>
+                    <div className="bg-gray-50 p-4 rounded-lg border border-gray-200 h-96 overflow-y-auto font-mono text-xs">
+                        {messageStore.log.length === 0 ? <p>No calls made yet.</p> :
+                            messageStore.log.map((entry, index) => (
+                                <div key={index} className="mb-2 p-2 bg-white rounded shadow-sm border-l-4 border-gray-300">
+                                    <pre className="whitespace-pre-wrap">{JSON.stringify(entry, null, 2)}</pre>
                                 </div>
                             ))}
-                        </div>
-                    )}
+                    </div>
                 </div>
             );
         };
 
         // ===================================================================
-        // 4. THE MAIN APP COMPONENT (THE "SHELL")
-        // The App component is now extremely simple. It just asks the
-        // ViewManagementService for the views and renders them.
+        // 4. MAIN APP & IOC CONFIGURATION
         // ===================================================================
         const App = () => {
-            // Depend on the view manager, not the individual views.
             const viewManager = useDependency(ViewManagementService);
-            const registeredViews = viewManager.getViews();
-
             return (
-                <div className="p-4 max-w-2xl mx-auto bg-white shadow-lg rounded-lg mt-8">
-                    <h1 className="text-3xl font-bold text-gray-800 mb-6">tutorial-soc (View Composition)</h1>
-                    {/*
-                      Dynamically render each registered view.
-                      Each view is responsible for its own state and dependencies.
-                    */}
-                    {registeredViews.map((ViewComponent, index) => (
-                        <Fragment key={index}>
-                            <ViewComponent />
-                        </Fragment>
-                    ))}
+                <div className="p-4 max-w-3xl mx-auto bg-white shadow-lg rounded-lg mt-8">
+                    <h1 className="text-3xl font-bold text-gray-800 mb-6 text-center">Mendix Backend Control Panel (RPC)</h1>
+                    {viewManager.getViews().map((ViewComponent, index) => <Fragment key={index}><ViewComponent /></Fragment>)}
                 </div>
             );
         };
 
-        // ===============================================================
-        // 5. IOC CONTAINER CONFIGURATION & APP ROOT
-        // ===============================================================
         const AppWithDependencies = connectDependencies(App, [
-            // Register foundational services as singletons
             [MessageStore],
             [ViewManagementService],
             [IMessageService, { useClass: BrowserMessageService }],
-
-            // Register our UI components against the `IView` identifier.
-            // The `ViewManagementService` will receive these in an array.
-            // The order here determines the render order.
             [IView, { useValue: InputView }],
-            [IView, { useValue: MessageListView }],
+            [IView, { useValue: EditorControlView }],
+            [IView, { useValue: MessageLogView }], // Renamed from MessageListView
         ]);
 
         const root = ReactDOM.createRoot(document.getElementById('app'));
