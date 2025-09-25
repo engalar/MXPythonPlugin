@@ -140,3 +140,33 @@
     *   `dockingWindowService`: Mendix Studio Pro提供的服务，用于控制UI面板和编辑器。
     *   `PostMessage(type, data)`: 向前端发送消息的全局函数。
     *   **职责**: 这些是后端与宿主环境（Mendix Studio Pro）交互的唯一手段。任何与Mendix模型或UI相关的操作都必须通过它们进行。
+
+
+
+## service
+
+extensionFileService
+logService
+microflowActivitiesService
+microflowExpressionService
+microflowService
+untypedModelAccessService
+dockingWindowService
+domainModelService
+backgroundJobService
+configurationService
+extensionFeaturesService
+httpClientService
+nameValidationService
+navigationManagerService
+pageGenerationService
+appService https://github.com/mendix/ExtensionAPI-Samples/blob/main/API%20Reference/Mendix.StudioPro.ExtensionsAPI.UI.Services/IAppService.md
+dialogService
+entityService
+findResultsPaneService
+localRunConfigurationsService
+notificationPopupService
+runtimeService
+selectorDialogService
+versionControlService
+messageBoxService

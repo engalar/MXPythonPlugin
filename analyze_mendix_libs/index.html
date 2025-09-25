@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <script src="assets/tailwindcss.js"></script>
+    <style>
+        /* Simple transition for collapsible sections */
+        .collapsible-content {
+            max-height: 0;
+            overflow: hidden;
+            transition: max-height 0.5s ease-in-out;
+        }
+        .collapsible-content.open {
+            max-height: 2000px; /* Large enough for content */
+        }
+    </style>
+</head>
+
+<body class="bg-gray-100 font-sans">
+    <div id="app"></div>
+
+    <script src="assets/vendor-bundle.umd.js"></script>
+    <script src="assets/babel.min.js"></script>
+    <script type="text/babel">
+        const { React, ReactDOM, redi, rediReact } = globalThis.__tmp;
+        delete globalThis.__tmp;
+
+        const { createIdentifier, setDependencies } = redi;
+        const { connectDependencies, useDependency } = rediReact;
+        const { useState, useEffect, useReducer, useCallback, Fragment, useMemo, useRef } = React;
+
+        // ===================================================================
+        // 1. STATE & COMMUNICATION SERVICES (RPC Architecture) - UNCHANGED
+        // ===================================================================
+        class MessageStore {
+            constructor() { this.log = []; this.listeners = new Set(); }
+            addLogEntry(entry) { this.log = [entry, ...this.log.slice(0, 99)]; this.notify(); } // Keep log to 100 entries
+            subscribe(listener) { this.listeners.add(listener); return () => this.listeners.delete(listener); }
+            notify() { this.listeners.forEach(listener => listener()); }
+        }
+
+        const IMessageService = createIdentifier('IMessageService');
+        class BrowserMessageService {
+            constructor(messageStore) {
+                this.messageStore = messageStore;
+                this.requestId = 0;
+                this.pendingRequests = new Map();
+                this.RPC_TIMEOUT = 15000; // 15 seconds for potentially slow analysis
+                window.addEventListener('message', this.handleBackendResponse);
+            }
+
+            async call(type, payload) {
+                const correlationId = `req-${this.requestId++}`;
+                const command = { type, payload, correlationId };
+                this.messageStore.addLogEntry({ type: 'request', correlationId, command });
+
+                return new Promise((resolve, reject) => {
+                    const timeoutId = setTimeout(() => {
+                        if (this.pendingRequests.has(correlationId)) {
+                            this.pendingRequests.delete(correlationId);
+                            const error = new Error(`RPC call for '${type}' timed out.`);
+                            this.messageStore.addLogEntry({ type: 'timeout', correlationId, error: error.message });
+                            reject(error);
+                        }
+                    }, this.RPC_TIMEOUT);
+
+                    this.pendingRequests.set(correlationId, { resolve, reject, timeoutId });
+                    window.parent.sendMessage("frontend:message", command);
+                });
+            }
+
+            handleBackendResponse = (event) => {
+                if (event.data?.type !== 'backendResponse') return;
+                try {
+                    const response = JSON.parse(event.data.data);
+                    const { correlationId } = response;
+                    if (!this.pendingRequests.has(correlationId)) return;
+
+                    const { resolve, reject, timeoutId } = this.pendingRequests.get(correlationId);
+                    clearTimeout(timeoutId);
+                    this.pendingRequests.delete(correlationId);
+                    this.messageStore.addLogEntry({ type: 'response', correlationId, response });
+
+                    if (response.status === 'success') resolve(response.data);
+                    else reject(new Error(response.message || 'Unknown backend error.'));
+                } catch (e) {
+                    this.messageStore.addLogEntry({ type: 'error', error: "Frontend failed to parse backend response." });
+                }
+            };
+        }
+        setDependencies(BrowserMessageService, [MessageStore]);
+
+        // Reusable hook for handling RPC calls
+        const useRpc = () => {
+            const messageService = useDependency(IMessageService);
+            const [state, setState] = useState({ isLoading: false, error: null, data: null });
+
+            const execute = useCallback(async (type, payload) => {
+                setState({ isLoading: true, error: null, data: null });
+                try {
+                    const result = await messageService.call(type, payload);
+                    setState({ isLoading: false, error: null, data: result });
+                    return result;
+                } catch (err) {
+                    setState({ isLoading: false, error: err.message, data: null });
+                    throw err;
+                }
+            }, [messageService]);
+
+            return { ...state, execute };
+        };
+
+        // ===================================================================
+        // 2. REFACTORED & INTERACTIVE UI COMPONENTS
+        // ===================================================================
+
+        const ChevronDownIcon = ({ className }) => (
+            <svg xmlns="http://www.w3.org/2000/svg" className={className || "h-5 w-5"} viewBox="0 0 20 20" fill="currentColor">
+                <path fillRule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clipRule="evenodd" />
+            </svg>
+        );
+        
+        const SortIcon = ({ direction }) => {
+            if (direction === 'ascending') return <span className="text-gray-600">▲</span>;
+            if (direction === 'descending') return <span className="text-gray-600">▼</span>;
+            return <span className="text-gray-300">▲▼</span>;
+        }
+
+        const CollapsibleSection = ({ title, children, startOpen = true, badge, badgeColor = 'gray' }) => {
+            const [isOpen, setIsOpen] = useState(startOpen);
+            
+            useEffect(() => {
+                setIsOpen(startOpen);
+            }, [startOpen]);
+
+            return (
+                <div className="border rounded-lg bg-white shadow-sm mb-4">
+                    <button
+                        className="w-full flex justify-between items-center p-3 text-left font-semibold text-lg text-gray-800 bg-gray-50 rounded-t-lg hover:bg-gray-100 focus:outline-none"
+                        onClick={() => setIsOpen(!isOpen)}
+                    >
+                        <div className="flex items-center">
+                            <span>{title}</span>
+                            {badge !== undefined && (
+                                <span className={`ml-3 px-2.5 py-0.5 text-xs font-semibold rounded-full bg-${badgeColor}-100 text-${badgeColor}-800`}>
+                                    {badge}
+                                </span>
+                            )}
+                        </div>
+                        <ChevronDownIcon className={`w-6 h-6 transform transition-transform duration-200 ${isOpen ? 'rotate-180' : ''}`} />
+                    </button>
+                    <div className={`collapsible-content ${isOpen ? 'open' : ''}`}>
+                         <div className="p-4 border-t">{children}</div>
+                    </div>
+                </div>
+            );
+        };
+
+        const SummaryCard = ({ title, value, color, onClick }) => (
+            <button
+                onClick={onClick}
+                className={`p-4 rounded-lg text-center cursor-pointer transition-all duration-200 hover:shadow-lg hover:-translate-y-1 bg-${color}-100 w-full focus:outline-none focus:ring-2 focus:ring-${color}-400`}
+            >
+                <div className={`text-3xl font-bold text-${color}-800`}>{value}</div>
+                <div className={`text-sm text-${color}-600 mt-1`}>{title}</div>
+            </button>
+        );
+
+        const ConflictsTable = ({ conflicts, onLibraryClick }) => {
+            const conflictLibs = Object.keys(conflicts);
+            if (conflictLibs.length === 0) {
+                return (
+                    <div className="p-6 bg-green-50 border border-green-200 rounded-lg text-center">
+                        <h3 className="text-xl font-semibold text-green-800">No Conflicts Detected</h3>
+                        <p className="text-green-600">All libraries with identifiable versions appear consistent.</p>
+                    </div>
+                );
+            }
+            return (
+                <div className="space-y-3">
+                    {conflictLibs.map(libName => (
+                        <div key={libName} className="bg-white rounded-md shadow-sm border border-red-200">
+                            <h4
+                                className="font-bold text-md p-2 bg-red-100 text-red-900 border-b border-red-200 cursor-pointer hover:bg-red-200 transition-colors"
+                                onClick={() => onLibraryClick(libName)}
+                                title={`Click to filter dependencies for "${libName}"`}
+                            >
+                                {libName}
+                            </h4>
+                            <ul className="divide-y divide-gray-200">
+                                {conflicts[libName].map((instance, index) => (
+                                    <li key={index} className="p-3 grid grid-cols-6 gap-3 items-center">
+                                        <div className="col-span-3 font-semibold text-gray-800">{instance.version}</div>
+                                        <div className="col-span-3 px-2 py-1 text-xs font-medium rounded-full text-center text-white bg-blue-500">{instance.source}</div>
+                                        <div className="col-span-6 text-gray-600 text-sm mt-1">{instance.details}</div>
+                                    </li>
+                                ))}
+                            </ul>
+                        </div>
+                    ))}
+                </div>
+            );
+        };
+        
+        const useSortableData = (items, config = { key: 'library_name', direction: 'ascending' }) => {
+            const [sortConfig, setSortConfig] = useState(config);
+
+            const sortedItems = useMemo(() => {
+                let sortableItems = [...items];
+                if (sortConfig !== null) {
+                    sortableItems.sort((a, b) => {
+                        if (a[sortConfig.key] < b[sortConfig.key]) {
+                            return sortConfig.direction === 'ascending' ? -1 : 1;
+                        }
+                        if (a[sortConfig.key] > b[sortConfig.key]) {
+                            return sortConfig.direction === 'ascending' ? 1 : -1;
+                        }
+                        return 0;
+                    });
+                }
+                return sortableItems;
+            }, [items, sortConfig]);
+
+            const requestSort = (key) => {
+                let direction = 'ascending';
+                if (sortConfig && sortConfig.key === key && sortConfig.direction === 'ascending') {
+                    direction = 'descending';
+                }
+                setSortConfig({ key, direction });
+            };
+
+            return { items: sortedItems, requestSort, sortConfig };
+        };
+
+        const AllDependenciesTable = ({ dependencies, filter, setFilter }) => {
+            const { items: sortedDeps, requestSort, sortConfig } = useSortableData(dependencies);
+            
+            const filteredDeps = useMemo(() => 
+                sortedDeps.filter(dep => 
+                    dep.library_name.toLowerCase().includes(filter.toLowerCase()) || 
+                    dep.version.toLowerCase().includes(filter.toLowerCase())
+                ), 
+            [sortedDeps, filter]);
+
+            const SortableHeader = ({ children, name }) => (
+                <th scope="col" className="px-4 py-3 cursor-pointer hover:bg-gray-200" onClick={() => requestSort(name)}>
+                    <div className="flex items-center justify-between">
+                        {children}
+                        <SortIcon direction={sortConfig?.key === name ? sortConfig.direction : null} />
+                    </div>
+                </th>
+            );
+
+            return (
+                <div>
+                     <input 
+                        type="text" 
+                        placeholder={`Filter ${dependencies.length} dependencies by name or version...`}
+                        value={filter}
+                        onChange={e => setFilter(e.target.value)}
+                        className="w-full p-2 mb-4 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    />
+                    <div className="overflow-auto bg-white rounded-lg shadow" style={{maxHeight: '60vh'}}>
+                        <table className="w-full text-sm text-left text-gray-700">
+                            <thead className="text-xs text-gray-800 uppercase bg-gray-100 sticky top-0">
+                                <tr>
+                                    <SortableHeader name="library_name">Library Name</SortableHeader>
+                                    <SortableHeader name="version">Version</SortableHeader>
+                                    <SortableHeader name="source">Source</SortableHeader>
+                                    <th scope="col" className="px-4 py-3">Details</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {filteredDeps.length > 0 ? filteredDeps.map((dep, index) => (
+                                    <tr key={index} className="border-b hover:bg-gray-50">
+                                        <td className="px-4 py-2 font-medium">{dep.library_name}</td>
+                                        <td className="px-4 py-2">{dep.version}</td>
+                                        <td className="px-4 py-2">{dep.source}</td>
+                                        <td className="px-4 py-2 text-gray-600 truncate max-w-xs" title={dep.details}>{dep.details}</td>
+                                    </tr>
+                                )) : (
+                                    <tr>
+                                        <td colSpan="4" className="text-center py-8 text-gray-500">No dependencies match your filter.</td>
+                                    </tr>
+                                )}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            );
+        };
+
+        const JarAnalysisTool = () => {
+            const { execute, isLoading, error, data } = useRpc();
+            const [filter, setFilter] = useState('');
+
+            const conflictsRef = useRef(null);
+            const dependenciesRef = useRef(null);
+            
+            const handleAnalyze = () => {
+                setFilter('');
+                execute('ANALYZE_JARS', {});
+            };
+
+            const scrollTo = (ref) => ref.current?.scrollIntoView({ behavior: 'smooth' });
+
+            return (
+                <div className="p-4 md:p-6 max-w-6xl mx-auto">
+                    <header className="bg-white shadow-md rounded-lg p-4 mb-6 flex flex-col md:flex-row justify-between items-center">
+                        <div>
+                            <h1 className="text-2xl font-bold text-gray-800">JAR Conflict Visualizer</h1>
+                            <p className="text-gray-600 text-sm mt-1">Analyze userlib and platform dependencies to find version conflicts.</p>
+                        </div>
+                         <button onClick={handleAnalyze} className="mt-4 md:mt-0 w-full md:w-auto px-6 py-2 bg-blue-600 text-white font-semibold rounded-md hover:bg-blue-700 transition-colors disabled:bg-gray-400 disabled:cursor-wait shrink-0" disabled={isLoading}>
+                            {isLoading ? 'Analyzing...' : 'Run Analysis'}
+                        </button>
+                    </header>
+
+                    <main>
+                        {error && <div className="p-4 mb-4 bg-red-100 text-red-800 rounded-md"><strong>Error:</strong> {error}</div>}
+                        
+                        {data && (
+                            <div>
+                                <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+                                    <SummaryCard title="Userlib JARs" value={data.summary.userlib_count} color="blue" onClick={() => scrollTo(dependenciesRef)} />
+                                    <SummaryCard title="Vendorlib JARs" value={data.summary.sbom_count} color="green" onClick={() => scrollTo(dependenciesRef)} />
+                                    <SummaryCard title="Total Dependencies" value={data.summary.total_count} color="purple" onClick={() => scrollTo(dependenciesRef)} />
+                                    <SummaryCard title="Conflicts Found" value={data.summary.conflict_count} color={data.summary.conflict_count > 0 ? 'red' : 'gray'} onClick={() => scrollTo(conflictsRef)} />
+                                </div>
+
+                                <div ref={conflictsRef}>
+                                    <CollapsibleSection
+                                        title="Conflict Analysis"
+                                        startOpen={data.summary.conflict_count > 0}
+                                        badge={data.summary.conflict_count}
+                                        badgeColor={data.summary.conflict_count > 0 ? 'red' : 'green'}
+                                    >
+                                        <ConflictsTable 
+                                            conflicts={data.conflicts} 
+                                            onLibraryClick={(libName) => {
+                                                setFilter(libName);
+                                                scrollTo(dependenciesRef);
+                                            }} 
+                                        />
+                                    </CollapsibleSection>
+                                </div>
+                                
+                                <div ref={dependenciesRef}>
+                                    <CollapsibleSection title="Full Dependency List" badge={data.dependencies.length}>
+                                        <AllDependenciesTable dependencies={data.dependencies} filter={filter} setFilter={setFilter} />
+                                    </CollapsibleSection>
+                                </div>
+                            </div>
+                        )}
+
+                        {!isLoading && !data && !error && (
+                             <div className="text-center py-16 bg-white rounded-lg shadow-md">
+                                <h2 className="text-xl text-gray-700">Ready to find conflicts?</h2>
+                                <p className="text-gray-500 mt-2">Click "Run Analysis" to begin.</p>
+                            </div>
+                        )}
+                    </main>
+                </div>
+            );
+        };
+
+        // ===================================================================
+        // 3. MAIN APP & IOC CONFIGURATION - UNCHANGED
+        // ===================================================================
+        const AppWithDependencies = connectDependencies(JarAnalysisTool, [
+            [MessageStore],
+            [IMessageService, { useClass: BrowserMessageService }],
+        ]);
+
+        const root = ReactDOM.createRoot(document.getElementById('app'));
+        root.render(<AppWithDependencies />);
+    </script>
+</body>
+
+</html>

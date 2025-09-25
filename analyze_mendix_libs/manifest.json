@@ -1,0 +1,14 @@
+{
+  "name": "JAR Conflict Visualizer",
+  "author": "AI Assistant",
+  "email": "",
+  "ui": "index.html",
+  "plugin": "main.py",
+  "home": "https://gist.github.com/engalar/c3f2281cdc9df5053605fc596e6b80ff",
+  "description": "Analyzes userlib and vendorlib JARs to identify and visualize potential version conflicts.",
+  "deps": [
+    "pythonnet",
+    "dependency-injector",
+    "pandas"
+  ]
+}

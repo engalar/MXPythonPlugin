@@ -59,7 +59,7 @@
 
 <body class="bg-gray-100 font-sans text-sm">
   <div id="app"></div>
-
+  <script src="assets/vendor-bundle.umd.js"></script>
   <script src="assets/babel.min.js"></script>
   <script type="text/babel">
     const { React, ReactDOM, redi, rediReact, rxjs } = globalThis.__tmp;
@@ -382,14 +382,6 @@
 
     const root = ReactDOM.createRoot(document.getElementById('app'));
     root.render(<AppWithDependencies />);
-  </script>
-  <script type="module">
-    import * as React from "https://esm.sh/react";
-    import ReactDOM from "https://esm.sh/react-dom/client";
-    import * as redi from "https://esm.sh/@wendellhu/redi";
-    import * as rediReact from "https://esm.sh/@wendellhu/redi/react-bindings";
-    import * as rxjs from "https://esm.sh/rxjs"; // <-- Added RxJS import
-    window.__tmp = { React, ReactDOM, redi, rediReact, rxjs }; // <-- Made RxJS available to the babel script
   </script>
 </body>
 

@@ -9,6 +9,7 @@
 <body class="bg-gray-100 font-sans">
     <div id="app"></div>
 
+    <script src="assets/vendor-bundle.umd.js"></script>
     <script src="assets/babel.min.js"></script>
     <script type="text/babel">
         const { React, ReactDOM, redi, rediReact } = globalThis.__tmp;
@@ -160,8 +161,8 @@
                 <div className="p-4 border-b border-gray-200">
                     <h2 className="text-xl font-semibold text-gray-700 mb-2">Echo Tool (RPC)</h2>
                     <div className="flex">
-                        <input type="text" className="flex-grow p-3 ..." value={inputValue} onChange={(e) => setInputValue(e.target.value)} disabled={isLoading} />
-                        <button onClick={handleSend} className="px-6 py-3 bg-blue-600 ... disabled:bg-gray-400" disabled={isLoading}>
+                        <input type="text" className="flex-grow p-3 border border-gray-300 rounded-l-md focus:ring-blue-500 focus:border-blue-500" value={inputValue} onChange={(e) => setInputValue(e.target.value)} disabled={isLoading} />
+                        <button onClick={handleSend} className="px-6 py-3 bg-blue-600 text-white font-semibold rounded-r-md hover:bg-blue-700 transition-colors disabled:bg-gray-400" disabled={isLoading}>
                             {isLoading ? 'Echoing...' : 'Send Echo'}
                         </button>
                     </div>
@@ -237,13 +238,6 @@
 
         const root = ReactDOM.createRoot(document.getElementById('app'));
         root.render(<AppWithDependencies />);
-    </script>
-    <script type="module">
-        import * as React from "https://esm.sh/react";
-        import ReactDOM from "https://esm.sh/react-dom/client";
-        import * as redi from "https://esm.sh/@wendellhu/redi";
-        import * as rediReact from "https://esm.sh/@wendellhu/redi/react-bindings";
-        window.__tmp = { React, ReactDOM, redi, rediReact };
     </script>
 </body>
 
