@@ -24,19 +24,10 @@
         // 1. STATE & COMMUNICATION SERVICES
         // ===================================================================
 
-        // 1.1. STATE MANAGEMENT (Now logs RPC calls)
-        class MessageStore {
-            constructor() { this.log = []; this.listeners = new Set(); }
-            addLogEntry(entry) { this.log = [entry, ...this.log]; this.notify(); }
-            subscribe(listener) { this.listeners.add(listener); return () => this.listeners.delete(listener); }
-            notify() { this.listeners.forEach(listener => listener()); }
-        }
-
         // 1.2. COMMUNICATION SERVICE (REFACTORED for RPC)
         const IMessageService = createIdentifier('IMessageService');
         class BrowserMessageService {
-            constructor(messageStore) {
-                this.messageStore = messageStore;
+            constructor() {
                 this.requestId = 0;
                 this.pendingRequests = new Map();
                 this.initializeListener();
@@ -48,15 +39,12 @@
                 const correlationId = `req-${this.requestId++}`;
                 const command = { type, payload, correlationId, timestamp: new Date().toISOString() };
 
-                this.messageStore.addLogEntry({ type: 'request', correlationId, command });
-
                 return new Promise((resolve, reject) => {
                     // Set a timeout for the request
                     const timeoutId = setTimeout(() => {
                         if (this.pendingRequests.has(correlationId)) {
                             this.pendingRequests.delete(correlationId);
                             const error = new Error(`RPC call timed out for type '${type}'`);
-                            this.messageStore.addLogEntry({ type: 'timeout', correlationId, error: error.message });
                             reject(error);
                         }
                     }, this.RPC_TIMEOUT);
@@ -86,7 +74,6 @@
                     clearTimeout(timeoutId); // Clear the timeout
                     this.pendingRequests.delete(correlationId); // Clean up
 
-                    this.messageStore.addLogEntry({ type: 'response', correlationId, response });
 
                     if (response.status === 'success') {
                         resolve(response.data);
@@ -95,12 +82,11 @@
                     }
                 } catch (e) {
                     console.error("Fatal error parsing backend response:", e, event.data.data);
-                    this.messageStore.addLogEntry({ type: 'error', error: "Frontend failed to parse backend response", raw: event.data.data });
                 }
             };
             dispose() { window.removeEventListener('message', this.handleBackendResponse); }
         }
-        setDependencies(BrowserMessageService, [MessageStore]);
+        setDependencies(BrowserMessageService, []);
 
 
         // ===================================================================
@@ -145,75 +131,88 @@
             return { execute, isLoading, error, data };
         };
 
-        const InputView = () => {
-            const [inputValue, setInputValue] = useState('Hello RPC!');
-            const { execute, isLoading } = useRpc();
+        // --- START: New MCP Control Component ---
+        const McpControlView = () => {
+            const [serverState, setServerState] = useState({ status: 'unknown', port: null, tools: [] });
+            const { execute: executeControl, isLoading: isControlLoading, error: controlError } = useRpc();
+            const { execute: executeQuery, isLoading: isQueryLoading, error: queryError } = useRpc();
 
-            const handleSend = async () => {
-                if (inputValue.trim() === '' || isLoading) return;
+            const isRunning = serverState.status === 'running';
+            const isLoading = isControlLoading || isQueryLoading;
+
+            const fetchStatus = useCallback(async () => {
                 try {
-                    await execute('ECHO', { content: inputValue });
-                    setInputValue(''); // Clear on success
-                } catch (e) { console.error("Echo failed:", e); }
+                    const statusData = await executeQuery('MCP_CONTROL', { action: 'get_status' });
+                    const toolsData = statusData.status === 'running'
+                        ? await executeQuery('MCP_CONTROL', { action: 'list_tools' })
+                        : { tools: [] };
+                    setServerState({ ...statusData, tools: toolsData.tools });
+                } catch (e) {
+                    console.error("Failed to fetch MCP status:", e);
+                    setServerState({ status: 'error', port: null, tools: [] });
+                }
+            }, [executeQuery]);
+
+            useEffect(() => {
+                fetchStatus();
+            }, [fetchStatus]);
+
+            const handleStart = async () => {
+                try {
+                    await executeControl('MCP_CONTROL', { action: 'start' });
+                    await fetchStatus();
+                } catch (e) { console.error("Failed to start MCP server:", e); }
             };
+
+            const handleStop = async () => {
+                try {
+                    await executeControl('MCP_CONTROL', { action: 'stop' });
+                    // Give server a moment to shut down before fetching status
+                    setTimeout(fetchStatus, 500);
+                } catch (e) { console.error("Failed to stop MCP server:", e); }
+            };
+
+            const statusColor = isRunning ? 'bg-green-500' : (serverState.status === 'stopped' ? 'bg-red-500' : 'bg-yellow-500');
+            const statusText = isRunning ? `Running on port ${serverState.port}` : (serverState.status === 'stopped' ? 'Stopped' : 'Unknown');
 
             return (
                 <div className="p-4 border-b border-gray-200">
-                    <h2 className="text-xl font-semibold text-gray-700 mb-2">Echo Tool (RPC) v4</h2>
-                    <div className="flex">
-                        <input type="text" className="flex-grow p-3 border border-gray-300 rounded-l-md focus:ring-blue-500 focus:border-blue-500" value={inputValue} onChange={(e) => setInputValue(e.target.value)} disabled={isLoading} />
-                        <button onClick={handleSend} className="px-6 py-3 bg-blue-600 text-white font-semibold rounded-r-md hover:bg-blue-700 transition-colors disabled:bg-gray-400" disabled={isLoading}>
-                            {isLoading ? 'Echoing...' : 'Send Echo'}
+                    <h2 className="text-xl font-semibold text-gray-700 mb-2">MCP Server Control</h2>
+                    <div className="flex items-center space-x-4 mb-4">
+                        <div className="flex items-center space-x-2">
+                            <span className={`w-3 h-3 rounded-full ${statusColor}`}></span>
+                            <span className="font-medium text-gray-800">{statusText}</span>
+                        </div>
+                        <button onClick={fetchStatus} disabled={isLoading} className="px-3 py-1 text-sm bg-gray-200 rounded hover:bg-gray-300 disabled:opacity-50">
+                            {isQueryLoading ? 'Refreshing...' : 'Refresh'}
                         </button>
                     </div>
-                </div>
-            );
-        };
-
-        const EditorControlView = () => {
-            const { execute, isLoading, error } = useRpc();
-
-            const handleOpenEditor = async () => {
-                try {
-                    const res = await execute('OPEN_EDITOR', { moduleName: 'Administration', entityName: 'Account' });
-                    console.dir(res)
-                } catch (e) { console.error("Open Editor failed:", e); }
-            };
-
-            return (
-                <div className="p-4 border-b border-gray-200">
-                    <h2 className="text-xl font-semibold text-gray-700 mb-2">Editor Control (RPC)</h2>
-                    <p className="text-sm text-gray-600 mb-3">Click to send an RPC call to open the 'Administration.Account' entity editor.</p>
-                    <button onClick={handleOpenEditor} className="w-full px-6 py-3 bg-green-600 ... disabled:bg-gray-400" disabled={isLoading}>
-                        {isLoading ? 'Requesting...' : 'Trigger TryOpenEditor'}
-                    </button>
-                    {error && <p className="text-red-600 mt-2 text-sm">{error}</p>}
-                </div>
-            );
-        };
-
-        const MessageLogView = () => {
-            const messageStore = useDependency(MessageStore);
-            const [, forceUpdate] = useReducer(x => x + 1, 0);
-            useEffect(() => {
-                const unsubscribe = messageStore.subscribe(forceUpdate);
-                return () => unsubscribe();
-            }, [messageStore]);
-
-            return (
-                <div className="p-4">
-                    <h2 className="text-xl font-semibold text-gray-700 mb-3">RPC Call Log:</h2>
-                    <div className="bg-gray-50 p-4 rounded-lg border border-gray-200 h-96 overflow-y-auto font-mono text-xs">
-                        {messageStore.log.length === 0 ? <p>No calls made yet.</p> :
-                            messageStore.log.map((entry, index) => (
-                                <div key={index} className="mb-2 p-2 bg-white rounded shadow-sm border-l-4 border-gray-300">
-                                    <pre className="whitespace-pre-wrap">{JSON.stringify(entry, null, 2)}</pre>
-                                </div>
-                            ))}
+                    <div className="grid grid-cols-2 gap-4">
+                        <button onClick={handleStart} disabled={isLoading || isRunning} className="w-full px-6 py-3 bg-blue-600 text-white rounded-md font-semibold hover:bg-blue-700 transition-colors disabled:bg-gray-400 disabled:cursor-not-allowed">
+                            {isControlLoading ? 'Starting...' : 'Start Server'}
+                        </button>
+                        <button onClick={handleStop} disabled={isLoading || !isRunning} className="w-full px-6 py-3 bg-red-600 text-white rounded-md font-semibold hover:bg-red-700 transition-colors disabled:bg-gray-400 disabled:cursor-not-allowed">
+                            {isControlLoading ? 'Stopping...' : 'Stop Server'}
+                        </button>
                     </div>
+                    {(controlError || queryError) && <p className="text-red-600 mt-2 text-sm">{controlError || queryError}</p>}
+
+                    {isRunning && serverState.tools.length > 0 && (
+                        <div className="mt-4">
+                            <h3 className="text-lg font-semibold text-gray-600 mb-2">Available Tools:</h3>
+                            <ul className="list-disc list-inside bg-gray-50 p-3 rounded border">
+                                {serverState.tools.map(tool => (
+                                    <li key={tool.name} className="text-gray-700">
+                                        <strong className="font-mono">{tool.name}</strong>: {tool.description}
+                                    </li>
+                                ))}
+                            </ul>
+                        </div>
+                    )}
                 </div>
             );
         };
+        // --- END: New MCP Control Component ---
 
         // ===================================================================
         // 4. MAIN APP & IOC CONFIGURATION
@@ -229,12 +228,10 @@
         };
 
         const AppWithDependencies = connectDependencies(App, [
-            [MessageStore],
             [ViewManagementService],
             [IMessageService, { useClass: BrowserMessageService }],
-            [IView, { useValue: InputView }],
-            [IView, { useValue: EditorControlView }],
-            [IView, { useValue: MessageLogView }], // Renamed from MessageListView
+            // Add the new MCP control view here
+            [IView, { useValue: McpControlView }],
         ]);
 
         const root = ReactDOM.createRoot(document.getElementById('app'));
