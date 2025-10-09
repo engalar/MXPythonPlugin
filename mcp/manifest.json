@@ -4,6 +4,7 @@
   "email": null,
   "ui": "index.html",
   "plugin": "main.py",
+  "home": "https://gist.github.com/engalar/1f290599776b6e6c80a5f0a135fe2310",
   "deps": [
     "pythonnet",
     "dependency-injector",
