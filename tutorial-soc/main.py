@@ -1,10 +1,12 @@
+# region 样板代码
 from Mendix.StudioPro.ExtensionsAPI.Model.DomainModels import IDomainModel, IEntity
 from Mendix.StudioPro.ExtensionsAPI.Model.Projects import IModule
 import clr
 from System.Text.Json import JsonSerializer
 import json
 import traceback
-from typing import Any, Dict, Callable
+from typing import Any, Dict, Callable, Iterable
+from abc import ABC, abstractmethod  # 引入ABC用于定义接口
 from dependency_injector import containers, providers
 from dependency_injector.wiring import inject, Provide
 
@@ -15,14 +17,7 @@ clr.AddReference("Mendix.StudioPro.ExtensionsAPI")
 
 # 运行时环境提供的工具
 PostMessage("backend:clear", '')  # 清理IDE控制台日志
-ShowDevTools()  # 打开前端开发者工具
-
-# 运行时环境提供的上下文变量如下
-# currentApp：mendix model
-# root：untyped model
-# dockingWindowService
-
-# region Utilities (Unchanged)
+# ShowDevTools()  # 打开前端开发者工具
 
 
 def serialize_json_object(json_object: Any) -> str:
@@ -35,8 +30,6 @@ def deserialize_json_string(json_string: str) -> Any:
 
 
 class TransactionManager:
-    """with TransactionManager(currentApp, f"your transaction name"):"""
-
     def __init__(self, app, transaction_name):
         self.app = app
         self.name = transaction_name
@@ -54,6 +47,7 @@ class TransactionManager:
         self.transaction.Dispose()
         return False
 # endregion
+# endregion
 
 # ===================================================================
 # 1. ABSTRACTIONS AND SERVICES (THE NEW ARCHITECTURE)
@@ -62,10 +56,8 @@ class TransactionManager:
 
 class MendixEnvironmentService:
     """
-    A service that abstracts away the Mendix host environment's global variables.
-    Any part of the application needing access to `currentApp`, `dockingWindowService`,
-    or `PostMessage` should depend on this service, not the globals themselves.
-    This adheres to the Dependency Inversion Principle (DIP).
+    一个抽象了Mendix宿主环境全局变量的服务。
+    (此部分保持不变)
     """
 
     def __init__(self, app_context, window_service, post_message_func: Callable):
@@ -73,26 +65,49 @@ class MendixEnvironmentService:
         self.window_service = window_service
         self.post_message = post_message_func
 
+# ----------------- Step 1: Define a Command Handler Interface -----------------
 
-class EchoService:
-    """Handles the business logic for the 'ECHO' command."""
+
+class ICommandHandler(ABC):
+    """
+    定义所有命令处理器的通用接口。
+    每个处理器都必须声明它能处理的命令类型，并提供一个执行方法。
+    """
+    @property
+    @abstractmethod
+    def command_type(self) -> str:
+        """返回此处理器响应的命令类型字符串，例如 "ECHO" 或 "OPEN_EDITOR"."""
+        ...
+
+    @abstractmethod
+    def execute(self, payload: Dict) -> Dict:
+        """执行与命令相关的业务逻辑。"""
+        ...
+
+# ----------------- Step 2: Refactor Services to Implement the Interface -----------------
+
+
+class EchoCommandHandler(ICommandHandler):
+    """处理'ECHO'命令的业务逻辑。"""
+    command_type = "ECHO"
 
     def __init__(self, mendix_env: MendixEnvironmentService):
         self._mendix_env = mendix_env
 
-    def echo(self, payload: Dict) -> Dict:
+    def execute(self, payload: Dict) -> Dict:
         self._mendix_env.post_message(
-            "backend:info", f"Received ECHO command with payload: {payload}")
+            "backend:info", f"Received {self.command_type} command with payload: {payload}")
         return {"echo_response": payload}
 
 
-class EditorService:
-    """Handles the business logic for the 'OPEN_EDITOR' command."""
+class EditorCommandHandler(ICommandHandler):
+    """处理'OPEN_EDITOR'命令的业务逻辑。"""
+    command_type = "OPEN_EDITOR"
 
     def __init__(self, mendix_env: MendixEnvironmentService):
         self._mendix_env = mendix_env
 
-    def open_editor(self, payload: Dict) -> Dict:
+    def execute(self, payload: Dict) -> Dict:
         module_name = payload.get("moduleName")
         entity_name = payload.get("entityName")
 
@@ -119,33 +134,37 @@ class EditorService:
         return {"moduleName": module_name, "entityName": entity_name, "opened": was_opened}
 
 
+# ----------------- Step 3: Modify the AppController -----------------
 class AppController:
     """
-    Handles routing of commands from the frontend to specific business logic services.
-    It depends on abstract services, not concrete implementations of logic.
+    将前端命令路由到特定的业务逻辑服务。
+    现在它依赖于一个可迭代的ICommandHandler集合，而不是具体的服务。
     """
 
-    def __init__(self, echo_service: EchoService, editor_service: EditorService, mendix_env: MendixEnvironmentService):
+    def __init__(self, handlers: Iterable[ICommandHandler], mendix_env: MendixEnvironmentService):
         self._mendix_env = mendix_env
-        self._command_handlers: Dict[str, Callable[[Dict], Any]] = {
-            "ECHO": echo_service.echo,
-            "OPEN_EDITOR": editor_service.open_editor,
-        }
+        # 在构造时动态构建命令处理器字典
+        self._command_handlers = {h.command_type: h.execute for h in handlers}
+        self._mendix_env.post_message(
+            "backend:info", f"Controller initialized with handlers for: {list(self._command_handlers.keys())}")
 
     def dispatch(self, request: Dict) -> Dict:
-        """Dispatches a request and ensures the response includes the correlationId."""
+        """
+        分发请求的逻辑保持不变，但现在更加灵活。
+        """
         command_type = request.get("type")
         payload = request.get("payload", {})
         correlation_id = request.get("correlationId")
 
-        handler = self._command_handlers.get(command_type)
-
-        if not handler:
-            return self._create_error_response(f"No handler found for command type: {command_type}", correlation_id)
-
         try:
-            result = handler(payload)
+            handler_execute_func = self._command_handlers.get(command_type)
+            if not handler_execute_func:
+                raise ValueError(
+                    f"No handler found for command type: {command_type}")
+
+            result = handler_execute_func(payload)
             return self._create_success_response(result, correlation_id)
+
         except Exception as e:
             error_message = f"Error executing command '{command_type}': {e}"
             self._mendix_env.post_message(
@@ -165,14 +184,10 @@ class AppController:
 
 class Container(containers.DeclarativeContainer):
     """
-    The Inversion of Control (IoC) container for the backend application.
-    It defines how to create and wire all the services together.
+    应用的控制反转(IoC)容器。
     """
-    # Configuration provider for injecting external values like the Mendix globals
     config = providers.Configuration()
 
-    # Provides a singleton instance of the MendixEnvironmentService.
-    # It's configured with the actual global variables provided by the host.
     mendix_env = providers.Singleton(
         MendixEnvironmentService,
         app_context=config.app_context,
@@ -180,72 +195,62 @@ class Container(containers.DeclarativeContainer):
         post_message_func=config.post_message_func,
     )
 
-    # Provides business logic services, injecting the environment service.
-    echo_service = providers.Singleton(EchoService, mendix_env=mendix_env)
-    editor_service = providers.Singleton(EditorService, mendix_env=mendix_env)
+    # ----------------- Step 4: Update IoC Container Configuration -----------------
 
-    # Provides the main AppController, injecting all necessary business logic services.
+    # 1. 将每个命令处理器注册为独立的Provider
+
+    # 2. 使用 providers.List 将所有命令处理器聚合到一个集合中
+    command_handlers = providers.List(
+        providers.Singleton(EchoCommandHandler, mendix_env=mendix_env),
+        providers.Singleton(EditorCommandHandler, mendix_env=mendix_env),
+        # **未来若要添加新命令，只需在此处添加新的handler provider即可**
+    )
+
+    # 3. 更新AppController的Provider，将聚合后的列表注入到其'handlers'参数
     app_controller = providers.Singleton(
         AppController,
-        echo_service=echo_service,
-        editor_service=editor_service,
+        handlers=command_handlers,
         mendix_env=mendix_env,
     )
 
 
 # ===================================================================
-# 3. APPLICATION ENTRYPOINT
+# 3. APPLICATION ENTRYPOINT AND WIRING
 # ===================================================================
 
-# Create the container instance
-container = Container()
-
-# **IMPORTANT**: Inject the actual Mendix global variables into the container's configuration.
-# This is the one and only place where globals are accessed directly.
-container.config.from_dict({
-    "app_context": currentApp,
-    "window_service": dockingWindowService,
-    "post_message_func": PostMessage,
-})
-
-
-def onMessage(
-    e: Any
-):
-    """
-    Entry point for all messages. Now a thin layer that delegates to the controller.
-    """
-    controller = container.app_controller()
+def onMessage(e: Any):
     if e.Message != "frontend:message":
         return
-
+    controller = container.app_controller()
+    request_object = None
     try:
         request_string = JsonSerializer.Serialize(e.Data)
         request_object = json.loads(request_string)
-
         if "correlationId" not in request_object:
             PostMessage(
                 "backend:info", f"Received message without correlationId: {request_object}")
             return
-
         response = controller.dispatch(request_object)
         PostMessage("backend:response", json.dumps(response))
-
     except Exception as ex:
         PostMessage(
             "backend:info", f"Fatal error in onMessage: {ex}\n{traceback.format_exc()}")
         correlation_id = "unknown"
-        try:
-            request_string = JsonSerializer.Serialize(e.Data)
-            request_object = json.loads(request_string)
-            correlation_id = request_object.get("correlationId", "unknown")
-        except:
-            pass
+        if request_object and "correlationId" in request_object:
+            correlation_id = request_object["correlationId"]
+        fatal_error_response = {"status": "error", "message": f"A fatal error occurred: {ex}", "data": {
+            "traceback": traceback.format_exc()}, "correlationId": correlation_id}
+        PostMessage("backend:response", json.dumps(fatal_error_response))
 
-        # Use the controller to create a consistently formatted error response
-        error_response = controller._create_error_response(
-            f"A fatal error occurred in the Python backend: {ex}",
-            correlation_id,
-            {"traceback": traceback.format_exc()}
-        )
-        PostMessage("backend:response", json.dumps(error_response))
+
+def initialize_app():
+    container = Container()
+    container.config.from_dict(
+        {"app_context": currentApp, "window_service": dockingWindowService, "post_message_func": PostMessage})
+    return container
+
+
+# ===================================================================
+# 4. APPLICATION START
+# ===================================================================
+container = initialize_app()

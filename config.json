@@ -1,4 +1,4 @@
 {
-  "mode": "execution",
+  "mode": "development",
   "defaultPlugin": "JAR Conflict Visualizer"
 }

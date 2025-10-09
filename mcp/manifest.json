@@ -1,0 +1,12 @@
+{
+  "name": "mcp",
+  "author": null,
+  "email": null,
+  "ui": "index.html",
+  "plugin": "main.py",
+  "deps": [
+    "pythonnet",
+    "dependency-injector",
+    "pymx"
+  ]
+}
