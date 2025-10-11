@@ -1,0 +1,539 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <script src="assets/tailwindcss.js"></script>
+</head>
+
+<body class="bg-gray-100 font-sans">
+    <div id="app"></div>
+
+    <script src="assets/vendor-bundle.umd.js"></script>
+    <script src="assets/babel.min.js"></script>
+    <script type="text/babel">
+        const { React, ReactDOM, redi, rediReact } = globalThis.__tmp;
+        delete globalThis.__tmp;
+
+        // keep unused import for redi and rediReact
+        const {
+            Inject,
+            Injector,
+            LookUp,
+            Many,
+            Optional,
+            Quantity,
+            RediError,
+            Self,
+            SkipSelf,
+            WithNew,
+            createIdentifier,
+            forwardRef,
+            isAsyncDependencyItem,
+            isAsyncHook,
+            isClassDependencyItem,
+            isCtor,
+            isDisposable,
+            isFactoryDependencyItem,
+            isValueDependencyItem,
+            setDependencies,
+        } = redi;
+        const {
+            RediConsumer,
+            RediContext,
+            RediProvider,
+            WithDependency,
+            connectDependencies,
+            connectInjector,
+            useDependency,
+            useInjector,
+            useObservable,
+            useUpdateBinder,
+        } = rediReact;
+        const { useState, useEffect, useReducer, Fragment, useCallback } = React;
+
+        // ===================================================================
+        // 1. STATE & COMMUNICATION SERVICES
+        // ===================================================================
+
+        const IMessageService = createIdentifier("IMessageService");
+        class BrowserMessageService {
+            constructor() {
+                this.requestId = 0;
+                this.pendingRequests = new Map();
+                this.initializeListener();
+                this.RPC_TIMEOUT = 10000;
+            }
+            async call(type, payload) {
+                const correlationId = `req-${this.requestId++}`;
+                const command = {
+                    type,
+                    payload,
+                    correlationId,
+                    timestamp: new Date().toISOString(),
+                };
+                return new Promise((resolve, reject) => {
+                    const timeoutId = setTimeout(() => {
+                        if (this.pendingRequests.has(correlationId)) {
+                            this.pendingRequests.delete(correlationId);
+                            reject(new Error(`RPC call timed out for type '${type}'`));
+                        }
+                    }, this.RPC_TIMEOUT);
+                    this.pendingRequests.set(correlationId, {
+                        resolve,
+                        reject,
+                        timeoutId,
+                    });
+                    window.parent.sendMessage("frontend:message", command);
+                });
+            }
+            initializeListener() {
+                window.addEventListener("message", this.handleBackendResponse);
+            }
+            handleBackendResponse = (event) => {
+                if (!(event.data && event.data.type === "backendResponse")) return;
+                try {
+                    const response = JSON.parse(event.data.data);
+                    const { correlationId } = response;
+                    if (!correlationId || !this.pendingRequests.has(correlationId))
+                        return;
+                    const { resolve, reject, timeoutId } =
+                        this.pendingRequests.get(correlationId);
+                    clearTimeout(timeoutId);
+                    this.pendingRequests.delete(correlationId);
+                    if (response.status === "success") {
+                        resolve(response.data);
+                    } else {
+                        reject(
+                            new Error(
+                                response.message || "An unknown backend error occurred."
+                            )
+                        );
+                    }
+                } catch (e) {
+                    console.error(
+                        "Fatal error parsing backend response:",
+                        e,
+                        event.data.data
+                    );
+                }
+            };
+            dispose() {
+                window.removeEventListener("message", this.handleBackendResponse);
+            }
+        }
+        setDependencies(BrowserMessageService, []);
+
+        // ===================================================================
+        // 2. VIEW ABSTRACTION AND MANAGEMENT
+        // ===================================================================
+        const IView = createIdentifier("IView");
+        class ViewManagementService {
+            constructor(views) {
+                this.views = views;
+            }
+            getViews() {
+                return this.views;
+            }
+        }
+        setDependencies(ViewManagementService, [[new Many(), IView]]);
+
+        // ===================================================================
+        // 3. UI COMPONENTS
+        // ===================================================================
+        const useRpc = () => {
+            const messageService = useDependency(IMessageService);
+            const [isLoading, setIsLoading] = useState(false);
+            const [error, setError] = useState(null);
+            const [data, setData] = useState(null);
+
+            const execute = useCallback(
+                async (type, payload) => {
+                    setIsLoading(true);
+                    setError(null);
+                    setData(null);
+                    try {
+                        const result = await messageService.call(type, payload);
+                        setData(result);
+                        return result;
+                    } catch (err) {
+                        setError(err.message);
+                        throw err;
+                    } finally {
+                        setIsLoading(false);
+                    }
+                },
+                [messageService]
+            );
+            return { execute, isLoading, error, data };
+        };
+
+        // --- START: New Git Log View Component ---
+        const GitLogView = () => {
+            const { execute, isLoading, error, data: commits } = useRpc();
+
+            useEffect(() => {
+                // Fetch the logs when the component mounts.
+                // The payload is empty because the backend knows the project path.
+                execute("GET_GIT_LOG", {});
+            }, [execute]); // execute is memoized by useCallback, so this runs once.
+
+            const renderContent = () => {
+                if (isLoading) {
+                    return (
+                        <p className="text-gray-500 text-center p-4">
+                            Loading commit history...
+                        </p>
+                    );
+                }
+                if (error) {
+                    return (
+                        <div
+                            className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded"
+                            role="alert"
+                        >
+                            <strong className="font-bold">Error: </strong>
+                            <span className="block sm:inline">{error}</span>
+                        </div>
+                    );
+                }
+                if (!commits || commits.length === 0) {
+                    return (
+                        <p className="text-gray-500 text-center p-4">No commits found.</p>
+                    );
+                }
+                return (
+                    <div className="space-y-4">
+                        {commits.map((commit) => (
+                            <div
+                                key={commit.sha}
+                                className="bg-white border border-gray-200 p-4 rounded-lg shadow-sm"
+                            >
+                                <div className="flex justify-between items-start">
+                                    <p
+                                        className="text-sm font-mono text-gray-500"
+                                        title={commit.sha}
+                                    >
+                                        {commit.sha.substring(0, 10)}
+                                    </p>
+                                    <p className="text-sm text-gray-500">{commit.date}</p>
+                                </div>
+                                <h3 className="text-lg font-semibold text-gray-800 my-1">
+                                    {commit.message}
+                                </h3>
+                                <p className="text-sm text-gray-600">
+                                    by <span className="font-medium">{commit.author}</span>
+                                </p>
+
+                                {commit.mx_metadata && (
+                                    <div className="mt-3 pt-3 border-t border-gray-200">
+                                        <h4 className="text-sm font-semibold text-gray-500 mb-1">
+                                            Mendix Metadata:
+                                        </h4>
+                                        <pre className="bg-gray-50 p-3 rounded-md text-xs text-gray-700 overflow-x-auto">
+                                            {JSON.stringify(commit.mx_metadata, null, 2)}
+                                        </pre>
+                                    </div>
+                                )}
+                            </div>
+                        ))}
+                    </div>
+                );
+            };
+
+            return (
+                <div className="p-4 border-t border-gray-200 mt-4">
+                    <h2 className="text-xl font-semibold text-gray-700 mb-4">
+                        Commit History & Mendix Metadata
+                    </h2>
+                    {renderContent()}
+                </div>
+            );
+        };
+        // --- END: New Git Log View Component ---
+
+        // ===================================================================
+        // 4. MAIN APP & IOC CONFIGURATION
+        // ===================================================================
+        const App = () => {
+            const viewManager = useDependency(ViewManagementService);
+            return (
+                <div className="p-4 max-w-4xl mx-auto bg-gray-50 shadow-lg rounded-lg mt-8">
+                    <h1 className="text-3xl font-bold text-gray-800 mb-6 text-center">
+                        Mendix Backend Control Panel
+                    </h1>
+                    {/* The MCP Control Panel would be rendered here if its view was registered */}
+                    {viewManager.getViews().map((ViewComponent, index) => (
+                        <Fragment key={index}>
+                            <ViewComponent />
+                        </Fragment>
+                    ))}
+                </div>
+            );
+        };
+
+        const Alert = ({ message, type = "error" }) => {
+            if (!message) return null;
+            const colors = {
+                error: "bg-red-100 border-red-400 text-red-700",
+                success: "bg-green-100 border-green-400 text-green-700",
+            };
+            return (
+                <div
+                    className={`${colors[type]} border px-4 py-3 rounded relative mb-4`}
+                    role="alert"
+                >
+                    <span className="block sm:inline">{message}</span>
+                </div>
+            );
+        };
+
+        const GitInitView = ({ onInitialized }) => {
+            const [message, setMessage] = useState("Initial commit");
+            const { execute, isLoading, error } = useRpc();
+
+            const handleInit = async () => {
+                if (!message.trim()) {
+                    alert("Please provide an initial commit message.");
+                    return;
+                }
+                try {
+                    await execute("GIT_INIT_COMMIT", { message });
+                    onInitialized(); // Callback to refresh the parent component's state
+                } catch (e) {
+                    // Error is already handled by the hook and displayed
+                }
+            };
+
+            return (
+                <div className="p-6 bg-yellow-50 border-2 border-dashed border-yellow-400 rounded-lg text-center">
+                    <h3 className="text-xl font-semibold text-gray-800">
+                        Not a Git Repository
+                    </h3>
+                    <p className="text-gray-600 my-4">
+                        This project is not yet under version control. You can initialize a new Git repository here.
+                    </p>
+                    <Alert message={error} />
+                    <div className="flex items-center justify-center space-x-2">
+                        <input
+                            type="text"
+                            value={message}
+                            onChange={(e) => setMessage(e.target.value)}
+                            placeholder="Initial commit message"
+                            className="w-full max-w-sm px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                            disabled={isLoading}
+                        />
+                        <button
+                            onClick={handleInit}
+                            disabled={isLoading}
+                            className="px-4 py-2 bg-blue-600 text-white font-semibold rounded-md hover:bg-blue-700 disabled:bg-blue-300 disabled:cursor-not-allowed"
+                        >
+                            {isLoading ? "Initializing..." : "Initialize & Commit"}
+                        </button>
+                    </div>
+                </div>
+            );
+        };
+
+        const BranchSelector = ({ current, all, onSwitch }) => {
+            const { execute, isLoading, error } = useRpc();
+            const [actionStatus, setActionStatus] = useState(null);
+
+            const handleSwitch = async (e) => {
+                const newBranch = e.target.value;
+                if (newBranch === current) return;
+                setActionStatus(null);
+                try {
+                    await execute("GIT_SWITCH_BRANCH", { branchName: newBranch });
+                    setActionStatus({ type: 'success', msg: `Switched to ${newBranch}` });
+                    onSwitch(); // Refresh parent
+                } catch (e) {
+                    // error is handled by the hook
+                    setActionStatus({ type: 'error', msg: e.message });
+                }
+            };
+
+            return (
+                <div className="flex items-center space-x-2">
+                    <span className="font-semibold text-gray-700">Current Branch:</span>
+                    <select
+                        value={current}
+                        onChange={handleSwitch}
+                        disabled={isLoading}
+                        className="px-3 py-1 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    >
+                        {all.map(branch => <option key={branch} value={branch}>{branch}</option>)}
+                    </select>
+                    {isLoading && <span className="text-sm text-gray-500">Switching...</span>}
+                    {actionStatus && <span className={`text-sm ${actionStatus.type === 'error' ? 'text-red-600' : 'text-green-600'}`}>{actionStatus.msg}</span>}
+                </div>
+            );
+        };
+
+        const RemoteEditor = ({ remote, onUpdate }) => {
+            const [isEditing, setIsEditing] = useState(false);
+            const [url, setUrl] = useState(remote.url);
+            const { execute, isLoading, error } = useRpc();
+
+            const handleSave = async () => {
+                try {
+                    await execute("GIT_SET_REMOTE_URL", { remoteName: remote.name, url });
+                    setIsEditing(false);
+                    onUpdate();
+                } catch (e) { /* error is handled by hook */ }
+            };
+
+            return (
+                <div className="flex items-center space-x-3 bg-gray-50 p-2 rounded">
+                    <span className="font-mono text-sm font-bold">{remote.name}</span>
+                    {isEditing ? (
+                        <input
+                            type="text"
+                            value={url}
+                            onChange={e => setUrl(e.target.value)}
+                            className="flex-grow px-2 py-1 border border-gray-300 rounded-md text-sm"
+                        />
+                    ) : (
+                        <span className="font-mono text-sm text-gray-600 truncate">{remote.url}</span>
+                    )}
+                    <div className="ml-auto">
+                        {isEditing ? (
+                            <>
+                                <button onClick={handleSave} disabled={isLoading} className="text-sm text-green-600 hover:text-green-800 disabled:text-gray-400">Save</button>
+                                <button onClick={() => setIsEditing(false)} className="ml-2 text-sm text-gray-500 hover:text-gray-700">Cancel</button>
+                            </>
+                        ) : (
+                            <button onClick={() => setIsEditing(true)} className="text-sm text-blue-600 hover:text-blue-800">Edit</button>
+                        )}
+                    </div>
+                    {error && <Alert message={error} />}
+                </div>
+            );
+        };
+
+        const GitRepoView = ({ status, onAction }) => (
+            <div>
+                <div className="p-4 bg-white border border-gray-200 rounded-lg shadow-sm mb-6 space-y-3">
+                    <h2 className="text-xl font-semibold text-gray-700">Repository Status</h2>
+                    <BranchSelector current={status.currentBranch} all={status.allBranches} onSwitch={onAction} />
+                    <div>
+                        <span className="font-semibold text-gray-700">Remotes:</span>
+                        {status.remotes.length > 0 ? (
+                            <div className="mt-1 space-y-2">
+                                {status.remotes.map(remote => <RemoteEditor key={remote.name} remote={remote} onUpdate={onAction} />)}
+                            </div>
+                        ) : <p className="text-sm text-gray-500">No remotes configured.</p>}
+                    </div>
+                </div>
+                <EnhancedGitLogView />
+            </div>
+        );
+
+        const EnhancedGitLogView = () => {
+            const { execute, isLoading, error, data: commits } = useRpc();
+
+            useEffect(() => {
+                execute("GET_GIT_LOG", {});
+            }, [execute]);
+
+            // Group commits by date using React.useMemo for performance
+            const groupedCommits = React.useMemo(() => {
+                if (!commits) return {};
+                return commits.reduce((acc, commit) => {
+                    const date = new Date(commit.date).toISOString().split('T')[0];
+                    if (!acc[date]) {
+                        acc[date] = [];
+                    }
+                    acc[date].push(commit);
+                    return acc;
+                }, {});
+            }, [commits]);
+
+            const renderContent = () => {
+                if (isLoading) return <p className="text-gray-500 text-center p-4">Loading commit history...</p>;
+                if (error) return <Alert message={error} />;
+                if (!commits || commits.length === 0) return <p className="text-gray-500 text-center p-4">No commits found.</p>;
+
+                return (
+                    <div className="space-y-6">
+                        {Object.entries(groupedCommits).map(([date, commitsForDay]) => (
+                            <div key={date}>
+                                <h3 className="text-lg font-semibold text-gray-600 sticky top-0 bg-gray-100 py-2 px-1 z-10">{new Date(date).toDateString()}</h3>
+                                <div className="space-y-4 mt-2">
+                                    {commitsForDay.map((commit) => (
+                                        <div key={commit.sha} className="bg-white border border-gray-200 p-4 rounded-lg shadow-sm">
+                                            {/* ... same commit rendering logic as before ... */}
+                                            <div className="flex justify-between items-start">
+                                                <p className="text-sm font-mono text-gray-500" title={commit.sha}>{commit.sha.substring(0, 10)}</p>
+                                                <p className="text-sm text-gray-500">{new Date(commit.date).toLocaleTimeString()}</p>
+                                            </div>
+                                            <h4 className="text-md font-semibold text-gray-800 my-1">{commit.message}</h4>
+                                            <p className="text-sm text-gray-600">by <span className="font-medium">{commit.author}</span></p>
+                                            {commit.mx_metadata && (
+                                                <div className="mt-3 pt-3 border-t border-gray-200">
+                                                    <h5 className="text-sm font-semibold text-gray-500 mb-1">Mendix Metadata:</h5>
+                                                    <pre className="bg-gray-50 p-3 rounded-md text-xs text-gray-700 overflow-x-auto">{JSON.stringify(commit.mx_metadata, null, 2)}</pre>
+                                                </div>
+                                            )}
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                );
+            };
+
+            return (
+                <div className="border-t border-gray-200 mt-4 pt-4">
+                    <h2 className="text-xl font-semibold text-gray-700 mb-4">Commit History</h2>
+                    {renderContent()}
+                </div>
+            );
+        };
+
+        const GitManagementView = () => {
+            const { execute, isLoading, error, data: status, setData } = useRpc();
+
+            const fetchStatus = useCallback(() => {
+                execute("GET_GIT_STATUS", {});
+            }, [execute]);
+
+            useEffect(() => {
+                fetchStatus();
+            }, [fetchStatus]);
+
+            if (isLoading) {
+                return <p className="text-center text-gray-500 p-8">Loading Git status...</p>
+            }
+            if (error) {
+                return <Alert message={`Failed to get Git status: ${error}`} />;
+            }
+            if (!status) {
+                return null; // Initial loading state
+            }
+
+            if (!status.isRepo) {
+                return <GitInitView onInitialized={fetchStatus} />;
+            }
+
+            if (status.error) {
+                return <Alert message={`An error occurred in the repository: ${status.error}`} />;
+            }
+
+            return <GitRepoView status={status} onAction={fetchStatus} />;
+        };
+
+        const AppWithDependencies = connectDependencies(App, [
+            [ViewManagementService],
+            [IMessageService, { useClass: BrowserMessageService }],
+            // Replace the old view with the new orchestrator component
+            [IView, { useValue: GitManagementView }],
+        ]);
+
+        const root = ReactDOM.createRoot(document.getElementById("app"));
+        root.render(<AppWithDependencies />);
+    </script>
+</body>
+
+</html>
