@@ -370,114 +370,256 @@
             );
         };
 
-        const RemoteEditor = ({ remote, onUpdate }) => {
+        // --- START: Enhanced RemoteEditor Component ---
+        const RemoteEditor = ({ remote, currentBranch, onUpdate }) => {
             const [isEditing, setIsEditing] = useState(false);
             const [url, setUrl] = useState(remote.url);
-            const { execute, isLoading, error } = useRpc();
+            const [actionStatus, setActionStatus] = useState(null); // { type: 'success' | 'error', msg: string }
+
+            const updateRpc = useRpc();
+            const deleteRpc = useRpc();
+            const pushRpc = useRpc();
+
+            // Effect to auto-clear status messages after 3 seconds
+            useEffect(() => {
+                if (actionStatus) {
+                    const timer = setTimeout(() => setActionStatus(null), 3000);
+                    return () => clearTimeout(timer);
+                }
+            }, [actionStatus]);
+
 
             const handleSave = async () => {
+                setActionStatus(null);
                 try {
-                    await execute("GIT_SET_REMOTE_URL", { remoteName: remote.name, url });
+                    await updateRpc.execute("GIT_SET_REMOTE_URL", { remoteName: remote.name, url });
                     setIsEditing(false);
-                    onUpdate();
-                } catch (e) { /* error is handled by hook */ }
+                    onUpdate(); // Refresh parent state
+                } catch (e) {
+                    setActionStatus({ type: 'error', msg: e.message });
+                }
+            };
+
+            const handleDelete = async () => {
+                if (!window.confirm(`Are you sure you want to delete the remote '${remote.name}'?`)) {
+                    return;
+                }
+                setActionStatus(null);
+                try {
+                    await deleteRpc.execute("GIT_DELETE_REMOTE", { remoteName: remote.name });
+                    onUpdate(); // Refresh parent state
+                } catch (e) {
+                    setActionStatus({ type: 'error', msg: e.message });
+                }
+            };
+
+            const handlePush = async () => {
+                setActionStatus(null);
+                try {
+                    const result = await pushRpc.execute("GIT_PUSH", { remoteName: remote.name, branchName: currentBranch });
+                    setActionStatus({ type: 'success', msg: `Successfully pushed to ${remote.name}` });
+                    onUpdate(); // Refresh logs
+                } catch (e) {
+                    setActionStatus({ type: 'error', msg: e.message });
+                }
+            };
+
+            const isLoading = updateRpc.isLoading || deleteRpc.isLoading || pushRpc.isLoading;
+
+            return (
+                <div className="bg-gray-50 p-2 rounded border border-gray-200">
+                    <div className="flex items-center space-x-3">
+                        <span className="font-mono text-sm font-bold w-24 truncate" title={remote.name}>{remote.name}</span>
+                        {isEditing ? (
+                            <input
+                                type="text"
+                                value={url}
+                                onChange={e => setUrl(e.target.value)}
+                                className="flex-grow px-2 py-1 border border-gray-300 rounded-md text-sm"
+                            />
+                        ) : (
+                            <span className="font-mono text-sm text-gray-600 flex-grow truncate" title={remote.url}>{remote.url}</span>
+                        )}
+                        <div className="flex items-center space-x-2 flex-shrink-0">
+                            {isEditing ? (
+                                <>
+                                    <button onClick={handleSave} disabled={isLoading} className="text-sm text-green-600 hover:text-green-800 disabled:text-gray-400">Save</button>
+                                    <button onClick={() => { setIsEditing(false); setActionStatus(null); }} className="text-sm text-gray-500 hover:text-gray-700">Cancel</button>
+                                </>
+                            ) : (
+                                <>
+                                    <button onClick={handlePush} disabled={isLoading} title={`Push ${currentBranch} to ${remote.name}`} className="text-sm text-indigo-600 hover:text-indigo-800 disabled:text-gray-400">Push</button>
+                                    <button onClick={() => setIsEditing(true)} className="text-sm text-blue-600 hover:text-blue-800">Edit</button>
+                                    <button onClick={handleDelete} disabled={isLoading} className="text-sm text-red-600 hover:text-red-800 disabled:text-gray-400">Delete</button>
+                                </>
+                            )}
+                        </div>
+                    </div>
+                    {(actionStatus || pushRpc.isLoading) && (
+                        <div className="mt-2 text-xs text-center">
+                            {pushRpc.isLoading && <span className="text-blue-600">Pushing to {remote.name}...</span>}
+                            {actionStatus && <span className={actionStatus.type === 'error' ? 'text-red-600' : 'text-green-600'}>{actionStatus.msg}</span>}
+                        </div>
+                    )}
+                </div>
+            );
+        };
+        // --- END: Enhanced RemoteEditor Component ---
+        const AddRemoteForm = ({ onAdded, onCancel }) => {
+            const [name, setName] = useState('');
+            const [url, setUrl] = useState('');
+            const { execute, isLoading, error } = useRpc();
+
+            const handleAdd = async () => {
+                if (!name.trim() || !url.trim()) {
+                    alert("Both remote name and URL are required.");
+                    return;
+                }
+                try {
+                    await execute("GIT_ADD_REMOTE", { name, url });
+                    onAdded(); // Callback to refresh and close the form
+                } catch (e) {
+                    // Error is handled and displayed by the hook
+                }
             };
 
             return (
-                <div className="flex items-center space-x-3 bg-gray-50 p-2 rounded">
-                    <span className="font-mono text-sm font-bold">{remote.name}</span>
-                    {isEditing ? (
+                <div className="p-3 bg-blue-50 border border-blue-200 rounded-lg mt-2 space-y-2">
+                    <h4 className="font-semibold text-gray-700">Add New Remote</h4>
+                    <Alert message={error} />
+                    <div className="flex items-center space-x-2">
+                        <input
+                            type="text"
+                            value={name}
+                            onChange={e => setName(e.target.value)}
+                            placeholder="Remote Name (e.g., origin)"
+                            className="w-1/3 px-2 py-1 border border-gray-300 rounded-md text-sm"
+                            disabled={isLoading}
+                        />
                         <input
                             type="text"
                             value={url}
                             onChange={e => setUrl(e.target.value)}
+                            placeholder="Remote URL"
                             className="flex-grow px-2 py-1 border border-gray-300 rounded-md text-sm"
+                            disabled={isLoading}
                         />
-                    ) : (
-                        <span className="font-mono text-sm text-gray-600 truncate">{remote.url}</span>
-                    )}
-                    <div className="ml-auto">
-                        {isEditing ? (
-                            <>
-                                <button onClick={handleSave} disabled={isLoading} className="text-sm text-green-600 hover:text-green-800 disabled:text-gray-400">Save</button>
-                                <button onClick={() => setIsEditing(false)} className="ml-2 text-sm text-gray-500 hover:text-gray-700">Cancel</button>
-                            </>
-                        ) : (
-                            <button onClick={() => setIsEditing(true)} className="text-sm text-blue-600 hover:text-blue-800">Edit</button>
-                        )}
                     </div>
-                    {error && <Alert message={error} />}
+                    <div className="flex justify-end space-x-2">
+                        <button onClick={onCancel} className="text-sm text-gray-600 hover:text-gray-800">Cancel</button>
+                        <button onClick={handleAdd} disabled={isLoading} className="px-3 py-1 bg-blue-600 text-white text-sm font-semibold rounded-md hover:bg-blue-700 disabled:bg-blue-300">
+                            {isLoading ? 'Adding...' : 'Add Remote'}
+                        </button>
+                    </div>
                 </div>
             );
         };
 
-        const GitRepoView = ({ status, onAction }) => (
-            <div>
-                <div className="p-4 bg-white border border-gray-200 rounded-lg shadow-sm mb-6 space-y-3">
-                    <h2 className="text-xl font-semibold text-gray-700">Repository Status</h2>
-                    <BranchSelector current={status.currentBranch} all={status.allBranches} onSwitch={onAction} />
-                    <div>
-                        <span className="font-semibold text-gray-700">Remotes:</span>
-                        {status.remotes.length > 0 ? (
-                            <div className="mt-1 space-y-2">
-                                {status.remotes.map(remote => <RemoteEditor key={remote.name} remote={remote} onUpdate={onAction} />)}
+        const GitRepoView = ({ status, onAction }) => {
+            const [isAddingRemote, setIsAddingRemote] = useState(false);
+
+            const handleRemoteAdded = () => {
+                setIsAddingRemote(false);
+                onAction(); // Refresh the entire status view
+            };
+
+            return (
+                <div>
+                    <div className="p-4 bg-white border border-gray-200 rounded-lg shadow-sm mb-6 space-y-3">
+                        <h2 className="text-xl font-semibold text-gray-700">Repository Status</h2>
+                        <BranchSelector current={status.currentBranch} all={status.allBranches} onSwitch={onAction} />
+                        <div>
+                            <div className="flex justify-between items-center">
+                                <span className="font-semibold text-gray-700">Remotes:</span>
+                                {!isAddingRemote && (
+                                    <button onClick={() => setIsAddingRemote(true)} className="px-2 py-1 bg-gray-200 text-gray-700 text-xs font-semibold rounded hover:bg-gray-300">
+                                        + Add Remote
+                                    </button>
+                                )}
                             </div>
-                        ) : <p className="text-sm text-gray-500">No remotes configured.</p>}
+                            {status.remotes.length > 0 ? (
+                                <div className="mt-1 space-y-2">
+                                    {status.remotes.map(remote => <RemoteEditor key={remote.name} currentBranch={status.currentBranch} remote={remote} onUpdate={onAction} />)}
+                                </div>
+                            ) : !isAddingRemote && <p className="text-sm text-gray-500 mt-1">No remotes configured.</p>}
+
+                            {isAddingRemote && <AddRemoteForm onAdded={handleRemoteAdded} onCancel={() => setIsAddingRemote(false)} />}
+                        </div>
                     </div>
+                    <EnhancedGitLogView />
                 </div>
-                <EnhancedGitLogView />
-            </div>
-        );
+            );
+        }
 
+        // --- START: EnhancedGitLogView with Lazy Loading ---
         const EnhancedGitLogView = () => {
-            const { execute, isLoading, error, data: commits } = useRpc();
+            const { execute, isLoading, error: initialError } = useRpc();
+            const [commits, setCommits] = useState([]);
+            const [page, setPage] = useState(1);
+            const [hasMore, setHasMore] = useState(true);
+            const [isLoadingMore, setIsLoadingMore] = useState(false);
+            const [loadMoreError, setLoadMoreError] = useState(null);
 
-            useEffect(() => {
-                execute("GET_GIT_LOG", {});
+            const loadCommits = useCallback(async (pageNum) => {
+                if (pageNum === 1) {
+                    // Initial load is handled by the main useRpc hook
+                    try {
+                        const data = await execute("GET_GIT_LOG", { page: pageNum, pageSize: 20 });
+                        setCommits(data.commits);
+                        setHasMore(data.hasMore);
+                        setPage(pageNum + 1);
+                    } catch (e) {
+                        // error is captured by initialError
+                    }
+                } else {
+                    // Subsequent loads for "Load More"
+                    setIsLoadingMore(true);
+                    setLoadMoreError(null);
+                    try {
+                        // We need a separate call, so we can't reuse the hook's state easily.
+                        // Re-using `execute` is fine as it's just the call function.
+                        const data = await execute("GET_GIT_LOG", { page: pageNum, pageSize: 20 });
+                        setCommits(prevCommits => [...prevCommits, ...data.commits]);
+                        setHasMore(data.hasMore);
+                        setPage(pageNum + 1);
+                    } catch (e) {
+                        setLoadMoreError(e.message);
+                    } finally {
+                        setIsLoadingMore(false);
+                    }
+                }
             }, [execute]);
 
-            // Group commits by date using React.useMemo for performance
-            const groupedCommits = React.useMemo(() => {
-                if (!commits) return {};
-                return commits.reduce((acc, commit) => {
-                    const date = new Date(commit.date).toISOString().split('T')[0];
-                    if (!acc[date]) {
-                        acc[date] = [];
-                    }
-                    acc[date].push(commit);
-                    return acc;
-                }, {});
-            }, [commits]);
+            useEffect(() => {
+                // Initial fetch
+                loadCommits(1);
+            }, [loadCommits]);
+
+            const handleLoadMore = () => {
+                loadCommits(page);
+            };
 
             const renderContent = () => {
                 if (isLoading) return <p className="text-gray-500 text-center p-4">Loading commit history...</p>;
-                if (error) return <Alert message={error} />;
-                if (!commits || commits.length === 0) return <p className="text-gray-500 text-center p-4">No commits found.</p>;
+                if (initialError) return <Alert message={initialError} />;
+                if (commits.length === 0) return <p className="text-gray-500 text-center p-4">No commits found.</p>;
 
                 return (
-                    <div className="space-y-6">
-                        {Object.entries(groupedCommits).map(([date, commitsForDay]) => (
-                            <div key={date}>
-                                <h3 className="text-lg font-semibold text-gray-600 sticky top-0 bg-gray-100 py-2 px-1 z-10">{new Date(date).toDateString()}</h3>
-                                <div className="space-y-4 mt-2">
-                                    {commitsForDay.map((commit) => (
-                                        <div key={commit.sha} className="bg-white border border-gray-200 p-4 rounded-lg shadow-sm">
-                                            {/* ... same commit rendering logic as before ... */}
-                                            <div className="flex justify-between items-start">
-                                                <p className="text-sm font-mono text-gray-500" title={commit.sha}>{commit.sha.substring(0, 10)}</p>
-                                                <p className="text-sm text-gray-500">{new Date(commit.date).toLocaleTimeString()}</p>
-                                            </div>
-                                            <h4 className="text-md font-semibold text-gray-800 my-1">{commit.message}</h4>
-                                            <p className="text-sm text-gray-600">by <span className="font-medium">{commit.author}</span></p>
-                                            {commit.mx_metadata && (
-                                                <div className="mt-3 pt-3 border-t border-gray-200">
-                                                    <h5 className="text-sm font-semibold text-gray-500 mb-1">Mendix Metadata:</h5>
-                                                    <pre className="bg-gray-50 p-3 rounded-md text-xs text-gray-700 overflow-x-auto">{JSON.stringify(commit.mx_metadata, null, 2)}</pre>
-                                                </div>
-                                            )}
-                                        </div>
-                                    ))}
+                    <div className="space-y-4">
+                        {commits.map((commit, index) => (
+                            <div key={`${commit.sha}-${index}`} className="bg-white border border-gray-200 p-4 rounded-lg shadow-sm">
+                                <div className="flex justify-between items-start">
+                                    <p className="text-sm font-mono text-gray-500" title={commit.sha}>{commit.sha.substring(0, 10)}</p>
+                                    <p className="text-sm text-gray-500">{new Date(commit.date).toLocaleString()}</p>
                                 </div>
+                                <h4 className="text-md font-semibold text-gray-800 my-1">{commit.message}</h4>
+                                <p className="text-sm text-gray-600">by <span className="font-medium">{commit.author}</span></p>
+                                {commit.mx_metadata && (
+                                    <div className="mt-3 pt-3 border-t border-gray-200">
+                                        <h5 className="text-sm font-semibold text-gray-500 mb-1">Mendix Metadata:</h5>
+                                        <pre className="bg-gray-50 p-3 rounded-md text-xs text-gray-700 overflow-x-auto">{JSON.stringify(commit.mx_metadata, null, 2)}</pre>
+                                    </div>
+                                )}
                             </div>
                         ))}
                     </div>
@@ -488,10 +630,23 @@
                 <div className="border-t border-gray-200 mt-4 pt-4">
                     <h2 className="text-xl font-semibold text-gray-700 mb-4">Commit History</h2>
                     {renderContent()}
+                    <div className="mt-6 text-center">
+                        {hasMore && (
+                            <button
+                                onClick={handleLoadMore}
+                                disabled={isLoadingMore}
+                                className="px-4 py-2 bg-blue-600 text-white font-semibold rounded-md hover:bg-blue-700 disabled:bg-blue-300"
+                            >
+                                {isLoadingMore ? 'Loading More...' : 'Load More'}
+                            </button>
+                        )}
+                        {loadMoreError && <Alert message={loadMoreError} />}
+                        {!hasMore && commits.length > 0 && <p className="text-gray-500">End of commit history.</p>}
+                    </div>
                 </div>
             );
         };
-
+        // --- END: EnhancedGitLogView with Lazy Loading ---
         const GitManagementView = () => {
             const { execute, isLoading, error, data: status, setData } = useRpc();
 

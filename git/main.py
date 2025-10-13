@@ -157,17 +157,27 @@ class EditorCommandHandler(ICommandHandler):
 # --- START: New Git Log Functionality ---
 
 
-def get_git_notes_log(repo_path: str) -> str:
-    """Runs the git log command to get commit history with mx_metadata notes."""
+# --- START: Paginated Git Log Function ---
+def get_git_notes_log_paginated(repo_path: str, page_size: int, skip_count: int) -> (list, bool):
+    """
+    Runs git log with pagination and returns commits and a flag indicating if more commits exist.
+    """
     if not os.path.isdir(repo_path) or not os.path.isdir(os.path.join(repo_path, '.git')):
         raise FileNotFoundError(
             f"'{repo_path}' is not a valid Git repository.")
-    command = ["git",
-               "log", "--show-notes=mx_metadata"]
-    result = execute_silent(
-        command, repo_path
-    )
-    return result.stdout
+
+    # Request one more than page_size to check if there are more pages
+    command = ["git", "log", "--show-notes=mx_metadata",
+               f"--max-count={page_size + 1}", f"--skip={skip_count}"]
+    result = execute_silent(command, repo_path)
+
+    all_fetched_commits = parse_git_log(result.stdout)
+
+    has_more = len(all_fetched_commits) > page_size
+    commits_for_page = all_fetched_commits[:page_size]
+
+    return commits_for_page, has_more
+# --- END: Paginated Git Log Function ---
 
 
 def parse_git_log(log_output: str) -> list:
@@ -209,30 +219,41 @@ def parse_git_log(log_output: str) -> list:
     return commits
 
 
+# --- START: Updated GitLogCommandHandler with Pagination Logic ---
 class GitLogCommandHandler(ICommandHandler):
     """
     Handles the 'GET_GIT_LOG' command requested by the frontend.
-    It fetches the git commit history with Mendix metadata and returns it.
+    It fetches a paginated list of the git commit history.
     """
     command_type = "GET_GIT_LOG"
+    DEFAULT_PAGE_SIZE = 20
 
     def __init__(self, mendix_env: MendixEnvironmentService):
         self._mendix_env = mendix_env
 
-    def execute(self, payload: Dict) -> list:
+    def execute(self, payload: Dict) -> dict:
         """
-        Executes the logic to get and parse the git log.
-        Payload is ignored as the repository path is determined from the environment.
+        Executes the logic to get and parse a page of the git log.
+        Payload can contain 'page' and 'pageSize'.
         """
-        self._mendix_env.post_message(
-            "backend:info", "Executing GET_GIT_LOG command.")
-        repo_path = self._mendix_env.get_project_path()
-        raw_log_output = get_git_notes_log(repo_path)
-        parsed_commits = parse_git_log(raw_log_output)
-        self._mendix_env.post_message(
-            "backend:info", f"Found {len(parsed_commits)} commits.")
-        return parsed_commits
+        page = payload.get("page", 1)
+        page_size = payload.get("pageSize", self.DEFAULT_PAGE_SIZE)
+        skip_count = (page - 1) * page_size
 
+        self._mendix_env.post_message(
+            "backend:info", f"Executing GET_GIT_LOG command for page {page}.")
+        repo_path = self._mendix_env.get_project_path()
+
+        # Call the new paginated function
+        commits, has_more = get_git_notes_log_paginated(
+            repo_path, page_size, skip_count)
+
+        self._mendix_env.post_message(
+            "backend:info", f"Found {len(commits)} commits for page {page}. Has more: {has_more}")
+
+        return {"commits": commits, "hasMore": has_more}
+
+# --- END: Updated GitLogCommandHandler with Pagination Logic ---
 # --- END: New Git Log Functionality ---
 # --- START: New Git Helper Functions (to be added near other git functions) ---
 
@@ -344,6 +365,99 @@ class GitSwitchBranchCommandHandler(ICommandHandler):
         return {"status": "success", "switchedTo": branch_name}
 
 
+class GitInitCommitCommandHandler(ICommandHandler):
+    """Handles initializing a repo and making the first commit."""
+    command_type = "GIT_INIT_COMMIT"
+
+    def __init__(self, mendix_env: MendixEnvironmentService):
+        self._mendix_env = mendix_env
+
+    def execute(self, payload: Dict) -> Dict:
+        message = payload.get("message")
+        if not message:
+            raise ValueError(
+                "Payload must contain a 'message' for the initial commit.")
+        repo_path = self._mendix_env.get_project_path()
+        return initialize_and_commit(repo_path, message)
+
+class GitAddRemoteCommandHandler(ICommandHandler):
+    """Handles adding a new git remote."""
+    command_type = "GIT_ADD_REMOTE"
+
+    def __init__(self, mendix_env: MendixEnvironmentService):
+        self._mendix_env = mendix_env
+
+    def execute(self, payload: Dict) -> Dict:
+        name = payload.get("name")
+        url = payload.get("url")
+        if not name or not url:
+            raise ValueError("Payload must contain 'name' and 'url'.")
+        repo_path = self._mendix_env.get_project_path()
+        run_git_command(repo_path, ["remote", "add", name, url])
+        return {"status": "success", "name": name, "url": url}
+
+
+# --- START: New Command Handlers for Remote Management and Push ---
+
+class GitDeleteRemoteCommandHandler(ICommandHandler):
+    """Handles deleting a git remote."""
+    command_type = "GIT_DELETE_REMOTE"
+
+    def __init__(self, mendix_env: MendixEnvironmentService):
+        self._mendix_env = mendix_env
+
+    def execute(self, payload: Dict) -> Dict:
+        remote_name = payload.get("remoteName")
+        if not remote_name:
+            raise ValueError("Payload must contain 'remoteName'.")
+        repo_path = self._mendix_env.get_project_path()
+        run_git_command(repo_path, ["remote", "rm", remote_name])
+        return {"status": "success", "removed": remote_name}
+
+class GitPushCommandHandler(ICommandHandler):
+    """Handles pushing to a specified remote."""
+    command_type = "GIT_PUSH"
+
+    def __init__(self, mendix_env: MendixEnvironmentService):
+        self._mendix_env = mendix_env
+
+    def execute(self, payload: Dict) -> Dict:
+        remote_name = payload.get("remoteName")
+        branch_name = payload.get("branchName")
+        if not remote_name or not branch_name:
+            raise ValueError("Payload must contain 'remoteName' and 'branchName'.")
+
+        repo_path = self._mendix_env.get_project_path()
+        try:
+            # Use execute_silent directly to capture stderr on failure
+            command = ["git", "push", remote_name, branch_name]
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                cwd=repo_path,
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+                timeout=120  # Increased timeout for network operations
+            )
+            if result.returncode != 0:
+                # Git often prints errors to stderr
+                error_message = result.stderr.strip() if result.stderr else result.stdout.strip()
+                raise Exception(f"Push failed: {error_message}")
+            
+            return {"status": "success", "output": result.stdout.strip()}
+
+        except subprocess.CalledProcessError as e:
+            # This might not be hit if check=False, but good practice
+            raise Exception(f"Push failed with exit code {e.returncode}: {e.stderr}")
+        except subprocess.TimeoutExpired:
+            raise Exception("Git push command timed out after 120 seconds.")
+        except Exception as e:
+            # Re-raise other exceptions with more context
+            raise Exception(f"An unexpected error occurred during git push: {e}")
+
+
+# --- END: New Command Handlers for Remote Management and Push ---
+
 class GitSetRemoteUrlCommandHandler(ICommandHandler):
     """Handles setting the URL for a git remote."""
     command_type = "GIT_SET_REMOTE_URL"
@@ -359,22 +473,6 @@ class GitSetRemoteUrlCommandHandler(ICommandHandler):
         repo_path = self._mendix_env.get_project_path()
         run_git_command(repo_path, ["remote", "set-url", remote_name, url])
         return {"status": "success", "remote": remote_name, "newUrl": url}
-
-
-class GitInitCommitCommandHandler(ICommandHandler):
-    """Handles initializing a repo and making the first commit."""
-    command_type = "GIT_INIT_COMMIT"
-
-    def __init__(self, mendix_env: MendixEnvironmentService):
-        self._mendix_env = mendix_env
-
-    def execute(self, payload: Dict) -> Dict:
-        message = payload.get("message")
-        if not message:
-            raise ValueError(
-                "Payload must contain a 'message' for the initial commit.")
-        repo_path = self._mendix_env.get_project_path()
-        return initialize_and_commit(repo_path, message)
 
 # --- END: New Command Handler Implementations ---
 
@@ -441,8 +539,7 @@ class Container(containers.DeclarativeContainer):
     # Use providers.List to aggregate all command handlers.
     # This makes the system pluggable; just add a new handler here.
     command_handlers = providers.List(
-        providers.Singleton(EchoCommandHandler, mendix_env=mendix_env),
-        providers.Singleton(EditorCommandHandler, mendix_env=mendix_env),
+        # ... existing handlers
         providers.Singleton(GitLogCommandHandler, mendix_env=mendix_env),
         providers.Singleton(GetGitStatusCommandHandler, mendix_env=mendix_env),
         providers.Singleton(GitSwitchBranchCommandHandler,
@@ -451,6 +548,14 @@ class Container(containers.DeclarativeContainer):
                             mendix_env=mendix_env),
         providers.Singleton(GitInitCommitCommandHandler,
                             mendix_env=mendix_env),
+        providers.Singleton(GitAddRemoteCommandHandler,
+                            mendix_env=mendix_env),
+        # --- START: Add these two new handlers ---
+        providers.Singleton(GitDeleteRemoteCommandHandler,
+                            mendix_env=mendix_env),
+        providers.Singleton(GitPushCommandHandler,
+                            mendix_env=mendix_env),
+        # --- END: Add these two new handlers ---
     )
 
     # The main controller, injected with the list of all available handlers
