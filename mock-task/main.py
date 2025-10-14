@@ -1,6 +1,7 @@
 import subprocess
 import sys
-import os
+import threading
+import uuid
 import time
 from dependency_injector import containers, providers
 from System.Text.Json import JsonSerializer
@@ -16,7 +17,7 @@ from abc import ABC, abstractmethod
 import clr
 clr.AddReference("System.Text.Json")
 clr.AddReference("Mendix.StudioPro.ExtensionsAPI")
-
+ShowDevTools()
 # Dependency Injection framework
 
 # --- START: New Imports for Git Log Functionality ---
@@ -110,40 +111,92 @@ class ICommandHandler(ABC):
         """Executes the business logic for the command and returns the result."""
         pass
 
+# --- START: New Abstraction for Asynchronous Handlers ---
+
+
+class IAsyncCommandHandler(ICommandHandler):
+    """
+    Extends ICommandHandler for tasks that should not block the main thread.
+    The dispatcher will run `execute_async` in a separate thread.
+    """
+    @abstractmethod
+    def execute_async(self, payload: Dict, task_id: str):
+        """
+        The logic to be executed in a background thread.
+        This method is responsible for posting completion messages back to the frontend.
+        """
+        pass
+# --- END: New Abstraction for Asynchronous Handlers ---
+
 # ===================================================================
 # 2. COMMAND HANDLER IMPLEMENTATIONS
 # ===================================================================
 
-# --- START: New Command Handler for Simulating Long Tasks ---
+# --- START: Modified Command Handler for Simulating Long Tasks ---
 
-class SimulateTaskCommandHandler(ICommandHandler):
-    """Handles the 'SIMULATE_TASK' command to test UI blocking."""
+
+# <-- Implement the new interface
+class SimulateTaskCommandHandler(IAsyncCommandHandler):
+    """
+    Handles the 'SIMULATE_TASK' command asynchronously.
+    """
     command_type = "SIMULATE_TASK"
 
     def __init__(self, mendix_env: MendixEnvironmentService):
         self._mendix_env = mendix_env
 
-    def execute(self, payload: Dict) -> Dict:
-        seconds = payload.get("seconds", 5)
+    def execute(self, payload: Dict) -> Any:
+        """
+        This is called by the dispatcher on the main thread.
+        It returns immediately, confirming the task has started.
+        The actual work is deferred to `execute_async`.
+        """
+        return {"status": "accepted", "message": "Async task has been accepted and is running in the background."}
+
+    def execute_async(self, payload: Dict, task_id: str):
+        """
+        This method runs in a background thread, preventing UI freeze.
+        """
+        seconds = 5
         try:
-            # Add a reasonable limit to prevent very long blocks
+            seconds = payload.get("seconds", 5)
             seconds_int = int(seconds)
             if not (0 < seconds_int <= 60):
-                 raise ValueError("Seconds must be an integer between 1 and 60.")
-        except (ValueError, TypeError):
-            raise ValueError("Payload 'seconds' must be a valid integer.")
+                raise ValueError(
+                    "Seconds must be an integer between 1 and 60.")
 
-        self._mendix_env.post_message(
-            "backend:info", f"Starting simulated task for {seconds_int} seconds.")
+            self._mendix_env.post_message(
+                "backend:info", f"[Task {task_id}] Starting simulated task for {seconds_int} seconds.")
 
-        time.sleep(seconds_int)
+            time.sleep(seconds_int)
 
-        self._mendix_env.post_message(
-            "backend:info", "Simulated task finished.")
+            result_message = f"Simulated task completed after {seconds_int} seconds."
+            self._mendix_env.post_message(
+                "backend:info", f"[Task {task_id}] {result_message}")
 
-        return {"status": "success", "message": f"Simulated task completed after {seconds_int} seconds."}
+            # Send a specific completion event back to the frontend
+            completion_event = {
+                "taskId": task_id,
+                "status": "success",
+                "data": {"message": result_message}
+            }
+            self._mendix_env.post_message(
+                "backend:response", json.dumps(completion_event))
 
-# --- END: New Command Handler for Simulating Long Tasks ---
+        except Exception as e:
+            error_message = f"Error in async task {task_id}: {e}"
+            self._mendix_env.post_message(
+                "backend:info", f"{error_message}\n{traceback.format_exc()}")
+            # Notify frontend of failure
+            error_event = {
+                "taskId": task_id,
+                "status": "error",
+                "payload": {"message": error_message}
+            }
+            self._mendix_env.post_message(
+                "backend:task_completed", json.dumps(error_event))
+
+# --- END: Modified Command Handler for Simulating Long Tasks ---
 
 # ===================================================================
 # 3. APPLICATION CONTROLLER / DISPATCHER
@@ -158,7 +211,7 @@ class AppController:
 
     def __init__(self, handlers: Iterable[ICommandHandler], mendix_env: MendixEnvironmentService):
         self._mendix_env = mendix_env
-        self._command_handlers = {h.command_type: h.execute for h in handlers}
+        self._command_handlers = {h.command_type: h for h in handlers}
         self._mendix_env.post_message(
             "backend:info", f"Controller initialized with handlers for: {list(self._command_handlers.keys())}")
 
@@ -167,12 +220,36 @@ class AppController:
         payload = request.get("payload", {})
         correlation_id = request.get("correlationId")
         try:
-            handler_execute_func = self._command_handlers.get(command_type)
-            if not handler_execute_func:
+            handler = self._command_handlers.get(command_type)
+            if not handler:
                 raise ValueError(
                     f"No handler found for command type: {command_type}")
-            result = handler_execute_func(payload)
-            return self._create_success_response(result, correlation_id)
+
+            # --- START: Async vs Sync Logic ---
+            if isinstance(handler, IAsyncCommandHandler):
+                task_id = f"task-{uuid.uuid4()}"
+                # Pass taskId to the handler's payload
+                payload["taskId"] = task_id
+
+                # Create and start the background thread
+                thread = threading.Thread(
+                    target=handler.execute_async,
+                    args=(payload, task_id)
+                )
+                thread.daemon = True  # Allows main program to exit even if threads are running
+                thread.start()
+
+                # `execute` now just confirms that the task has started
+                result = handler.execute(payload)
+                # We add the taskId to the initial response so the frontend can track it
+                result['taskId'] = task_id
+                return self._create_success_response(result, correlation_id)
+            else:
+                # Original synchronous execution path
+                result = handler.execute(payload)
+                return self._create_success_response(result, correlation_id)
+            # --- END: Async vs Sync Logic ---
+
         except Exception as e:
             error_message = f"Error executing command '{command_type}': {e}"
             self._mendix_env.post_message(

@@ -50,65 +50,107 @@
             useObservable,
             useUpdateBinder,
         } = rediReact;
-        const { useState, useEffect, useReducer, Fragment, useCallback, createContext, useContext } = React;
+        const {
+            useState,
+            useEffect,
+            useRef,
+            useReducer,
+            Fragment,
+            useCallback,
+            createContext,
+            useContext,
+        } = React;
 
         // ===================================================================
         // 1. STATE & COMMUNICATION SERVICES
         // ===================================================================
 
+        // --- START: New Service for Backend-Pushed Events ---
+        const IBackendEventService = createIdentifier("IBackendEventService");
+        class BackendEventService {
+            constructor() {
+                this.subscribers = new Map();
+            }
+
+            subscribe(eventType, callback) {
+                if (!this.subscribers.has(eventType)) {
+                    this.subscribers.set(eventType, new Set());
+                }
+                this.subscribers.get(eventType).add(callback);
+
+                // Return an unsubscribe function
+                return () => {
+                    const eventSubscribers = this.subscribers.get(eventType);
+                    if (eventSubscribers) {
+                        eventSubscribers.delete(callback);
+                    }
+                };
+            }
+
+            publish(eventType, data) {
+                const eventSubscribers = this.subscribers.get(eventType);
+                if (eventSubscribers) {
+                    eventSubscribers.forEach((callback) => callback(data));
+                }
+            }
+        }
+        setDependencies(BackendEventService, []);
+        // --- END: New Service for Backend-Pushed Events ---
+
         const IMessageService = createIdentifier("IMessageService");
         class BrowserMessageService {
-            constructor() {
+            // It now only publishes events, no longer managing RPC promises itself.
+            constructor(eventService) {
+                this.eventService = eventService;
                 this.requestId = 0;
-                this.pendingRequests = new Map();
+                this.handleBackendResponse = this.handleBackendResponse.bind(this);
                 this.initializeListener();
-                this.RPC_TIMEOUT = 10000;
             }
             async call(type, payload) {
+                // The signature is the same, but it's used differently
                 const correlationId = `req-${this.requestId++}`;
-                const command = { type, payload, correlationId, timestamp: new Date().toISOString() };
-                return new Promise((resolve, reject) => {
-                    const timeoutId = setTimeout(() => {
-                        if (this.pendingRequests.has(correlationId)) {
-                            this.pendingRequests.delete(correlationId);
-                            reject(new Error(`RPC call timed out for type '${type}'`));
-                        }
-                    }, this.RPC_TIMEOUT);
-                    this.pendingRequests.set(correlationId, { resolve, reject, timeoutId });
-                    window.parent.sendMessage("frontend:message", command);
-                });
+                const command = {
+                    type,
+                    payload,
+                    correlationId,
+                    timestamp: new Date().toISOString(),
+                };
+                window.parent.sendMessage("frontend:message", command);
+                return correlationId; // Returns correlationId for the CommandService to track
             }
             initializeListener() {
                 window.addEventListener("message", this.handleBackendResponse);
             }
-            handleBackendResponse = (event) => {
-                if (!(event.data && event.data.type === "backendResponse")) return;
-                try {
-                    const response = JSON.parse(event.data.data);
-                    const { correlationId } = response;
-                    if (!correlationId || !this.pendingRequests.has(correlationId)) return;
-                    const { resolve, reject, timeoutId } = this.pendingRequests.get(correlationId);
-                    clearTimeout(timeoutId);
-                    this.pendingRequests.delete(correlationId);
-                    if (response.status === "success") {
-                        resolve(response.data);
-                    } else {
-                        reject(new Error(response.message || "An unknown backend error occurred."));
+            handleBackendResponse(event) {
+                if (event.data && event.data.type === "backendResponse") {
+                    // not backend:response actual
+                    try {
+                        const response = JSON.parse(event.data.data);
+                        // Publish the entire response as a generic event
+                        this.eventService.publish("backendResponse", response);
+                    } catch (e) {
+                        console.error(
+                            "Fatal error parsing backend response:",
+                            e,
+                            event.data.data
+                        );
                     }
-                } catch (e) {
-                    console.error("Fatal error parsing backend response:", e, event.data.data);
                 }
-            };
+            }
             dispose() {
                 window.removeEventListener("message", this.handleBackendResponse);
             }
         }
-        setDependencies(BrowserMessageService, []);
+        setDependencies(BrowserMessageService, [IBackendEventService]);
 
         const IView = createIdentifier("IView");
         class ViewManagementService {
-            constructor(views) { this.views = views; }
-            getViews() { return this.views; }
+            constructor(views) {
+                this.views = views;
+            }
+            getViews() {
+                return this.views;
+            }
         }
         setDependencies(ViewManagementService, [[new Many(), IView]]);
 
@@ -116,8 +158,96 @@
         // 2. REUSABLE HOOKS (Centralized stateful logic)
         // ===================================================================
 
-        const useRpc = () => {
-            const messageService = useDependency(IMessageService);
+        // --- START: New High-Level Command Service ---
+        const ICommandService = createIdentifier("ICommandService");
+        class CommandService {
+            constructor(messageService, eventService) {
+                this.messageService = messageService;
+                this.pendingCommands = new Map(); // For both sync RPC and async tasks
+                this.RPC_TIMEOUT = 10000;
+                this.handleBackendResponse = this.handleBackendResponse.bind(this);
+
+                eventService.subscribe("backendResponse", this.handleBackendResponse);
+            }
+
+            execute = (type, payload) => {
+                return new Promise(async (resolve, reject) => {
+                    const commandId = await this.messageService.call(type, payload);
+
+                    const timeoutId = setTimeout(() => {
+                        if (this.pendingCommands.has(commandId)) {
+                            this.pendingCommands.delete(commandId);
+                            reject(new Error(`Command '${type}' timed out.`));
+                        }
+                    }, this.RPC_TIMEOUT);
+
+                    this.pendingCommands.set(commandId, {
+                        resolve,
+                        reject,
+                        timeoutId,
+                        type,
+                    });
+                });
+            };
+
+            handleBackendResponse(response) {
+                const { correlationId, taskId } = response;
+                const commandId = correlationId || taskId;
+
+                if (!commandId || !this.pendingCommands.has(commandId)) {
+                    return; // Not a command we are waiting for, or it's an async completion
+                }
+
+                // --- Logic for Sync RPC response ---
+                if (correlationId) {
+                    const cmd =
+                        this.pendingCommands.get(correlationId);
+                    clearTimeout(cmd.timeoutId);
+                    this.pendingCommands.delete(correlationId);
+
+                    if (response.status === "success") {
+                        // Check if it's an async task starting up
+                        if (response.data && response.data.taskId) {
+                            const newTaskId = response.data.taskId;
+                            // Transfer the promise handlers to the new taskId
+                            const commandState = this.pendingCommands.get(
+                                correlationId
+                            ) || { resolve: cmd.resolve, reject: cmd.reject, timeoutId: cmd.timeoutId };
+                            this.pendingCommands.set(newTaskId, {
+                                ...commandState,
+                                type: "async-task",
+                            });
+                        } else {
+                            cmd.resolve(response.data);
+                        }
+                    } else {
+                        cmd.reject(
+                            new Error(
+                                response.message || "An unknown backend error occurred."
+                            )
+                        );
+                    }
+                }
+                // --- Logic for Async task completion response ---
+                else if (taskId) {
+                    const cmd2 = this.pendingCommands.get(taskId);// babel issue, i should use diff var name
+                    clearTimeout(cmd2.timeoutId); // In case we want a total task timeout
+                    this.pendingCommands.delete(taskId);
+
+                    if (response.status === "success") {
+                        cmd2.resolve(response.data);
+                    } else {
+                        cmd2.reject(new Error(response.message || "Async task failed."));
+                    }
+                }
+            }
+        }
+        setDependencies(CommandService, [IMessageService, IBackendEventService]);
+        // --- END: New High-Level Command Service ---
+
+        // --- START: The ONLY hook UI components need to use ---
+        const useCommand = () => {
+            const commandService = useDependency(ICommandService);
             const [isLoading, setIsLoading] = useState(false);
             const [error, setError] = useState(null);
             const [data, setData] = useState(null);
@@ -128,7 +258,7 @@
                     setError(null);
                     setData(null);
                     try {
-                        const result = await messageService.call(type, payload);
+                        const result = await commandService.execute(type, payload);
                         setData(result);
                         return result;
                     } catch (err) {
@@ -138,62 +268,62 @@
                         setIsLoading(false);
                     }
                 },
-                [messageService]
+                [commandService]
             );
-            return { execute, isLoading, error, data, setData };
+            return { execute, isLoading, error, data };
         };
+        // --- END: Unified Hook ---
 
         // --- START: New Component for Simulating Long Tasks ---
         const SimulateTaskView = () => {
             const [seconds, setSeconds] = useState(5);
-            const { execute, isLoading, error, data, setData } = useRpc();
+            // --- The component now uses the simple, unified hook ---
+            const { execute, isLoading, error, data } = useCommand();
 
             const handleStartTask = async () => {
                 const duration = parseInt(seconds, 10);
-                if (isNaN(duration) || duration <= 0) {
-                    // Simple validation feedback
-                    setData(null); // Clear previous success messages
-                    return;
-                }
-                // The `execute` call will handle setting loading/error states
-                await execute("SIMULATE_TASK", { seconds: duration }).catch(() => { });
+                if (isNaN(duration) || duration <= 0) return;
+                // The call is identical for sync or async. The hook handles the complexity.
+                execute("SIMULATE_TASK", { seconds: duration }).then(data => {
+                    console.log(data);
+                }).catch(() => { });
             };
 
             return (
                 <div className="border-t border-gray-300 mt-6 pt-6">
-                    <h2 className="text-xl font-semibold text-gray-700 mb-4">Task Simulation (Test Case)</h2>
+                    <h2 className="text-xl font-semibold text-gray-700 mb-4">
+                        Unified Task Runner
+                    </h2>
                     <p className="text-sm text-gray-600 mb-4">
-                        This tool simulates a long-running backend task to test the UI's responsiveness.
-                        The UI should appear blocked while the task is running.
+                        Click the button to run a task. The UI remains responsive because
+                        the underlying command is handled asynchronously, but the calling
+                        code is simple and unified.
                     </p>
                     <div className="flex items-center space-x-3 p-4 bg-white border border-gray-200 rounded-lg">
-                        <label htmlFor="duration" className="font-medium text-gray-700">Duration (s):</label>
                         <input
-                            id="duration"
                             type="number"
                             value={seconds}
                             onChange={(e) => setSeconds(e.target.value)}
-                            className="w-24 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                            className="w-24 px-3 py-2 border border-gray-300 rounded-md"
                             disabled={isLoading}
-                            min="1"
-                            max="60"
                         />
                         <button
                             onClick={handleStartTask}
                             disabled={isLoading}
-                            className="px-4 py-2 bg-purple-600 text-white font-semibold rounded-md hover:bg-purple-700 disabled:bg-purple-300 disabled:cursor-not-allowed"
+                            className="px-4 py-2 bg-purple-600 text-white font-semibold rounded-md hover:bg-purple-700 disabled:bg-purple-300 disabled:cursor-not-allowed w-48 text-center"
                         >
-                            {isLoading ? `Running for ${seconds}s...` : 'Start Blocking Task'}
+                            {isLoading ? `Running (${seconds}s)...` : "Start Unified Task"}
                         </button>
                     </div>
                     <div className="mt-3 h-6">
                         {error && <Alert message={error} type="error" />}
-                        {data && !isLoading && <Alert message={data.message} type="success" />}
+                        {data && !isLoading && (
+                            <Alert message={data.message} type="success" />
+                        )}
                     </div>
                 </div>
             );
-        };
-        // --- END: New Component for Simulating Long Tasks ---
+        }; // --- END: New Component for Simulating Long Tasks ---
         // ===================================================================
         // 5. MAIN APP & IOC CONFIGURATION (No changes needed)
         // ===================================================================
@@ -215,8 +345,11 @@
 
         const AppWithDependencies = connectDependencies(App, [
             [ViewManagementService],
+            // --- MODIFIED: Register the new event service ---
+            [IBackendEventService, { useClass: BackendEventService }],
             [IMessageService, { useClass: BrowserMessageService }],
-            [IView, { useValue: SimulateTaskView }], // Uses the new, clean view
+            [ICommandService, { useClass: CommandService }],
+            [IView, { useValue: SimulateTaskView }],
         ]);
 
         const root = ReactDOM.createRoot(document.getElementById("app"));
