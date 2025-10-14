@@ -161,14 +161,34 @@ class EditorCommandHandler(ICommandHandler):
 def get_git_notes_log_paginated(repo_path: str, page_size: int, skip_count: int) -> (list, bool):
     """
     Runs git log with pagination and returns commits and a flag indicating if more commits exist.
+    The output is formatted for robust parsing.
     """
     if not os.path.isdir(repo_path) or not os.path.isdir(os.path.join(repo_path, '.git')):
         raise FileNotFoundError(
             f"'{repo_path}' is not a valid Git repository.")
 
     # Request one more than page_size to check if there are more pages
-    command = ["git", "log", "--show-notes=mx_metadata",
-               f"--max-count={page_size + 1}", f"--skip={skip_count}"]
+    # %H: full hash, %an: author name, %ai: author date (ISO), %P: parent hashes,
+    # %d: decorations (refs), %s: subject, %b: body, %N: notes
+    # --- FIX: Added a custom separator and the %N placeholder for notes ---
+    log_format = (
+        "commit %H%n"
+        "Author: %an%n"
+        "Date: %ai%n"
+        "Parents: %P%n"
+        "Refs: %d%n"
+        "%n%s%n%b"
+        "%n%nNotes (mx_metadata):%n%N"
+    )
+    command = [
+        "git", "log",
+        # Keep --show-notes to specify WHICH notes ref to use for the %N placeholder
+        "--show-notes=mx_metadata",
+        "--decorate=full",
+        f"--pretty=format:{log_format}",
+        f"--max-count={page_size + 1}",
+        f"--skip={skip_count}"
+    ]
     result = execute_silent(command, repo_path)
 
     all_fetched_commits = parse_git_log(result.stdout)
@@ -178,6 +198,139 @@ def get_git_notes_log_paginated(repo_path: str, page_size: int, skip_count: int)
 
     return commits_for_page, has_more
 # --- END: Paginated Git Log Function ---
+
+
+def parse_git_log(log_output: str) -> list:
+    """
+    Parses the raw output from 'git log' with a custom format into a structured list.
+    Handles multi-line messages, parents, refs (branches/tags), and notes.
+    """
+    commits = []
+    if not log_output.strip():
+        return []
+
+    commit_blocks = log_output.strip().split("\ncommit ")
+    if commit_blocks and not commit_blocks[0].startswith("commit "):
+        commit_blocks[0] = "commit " + commit_blocks[0]
+
+    for block in commit_blocks:
+        if not block.strip():
+            continue
+
+        commit_data = {
+            "sha": None, "author": None, "date": None, "message": None,
+            "mx_metadata": None, "parents": [], "refs": []
+        }
+        notes_separator = "\n\nNotes (mx_metadata):\n"
+
+        if notes_separator in block:
+            main_part, notes_part = block.split(notes_separator, 1)
+            # --- FIX: Robustly handle commits with no notes content ---
+            notes_content = notes_part.strip()
+            if notes_content:
+                try:
+                    commit_data["mx_metadata"] = json.loads(notes_content)
+                except json.JSONDecodeError:
+                    commit_data["mx_metadata"] = {"error": "JSONDecodeError", "raw": notes_content}
+        else:
+            main_part = block
+
+        lines = main_part.strip().split('\n')
+        message_lines, is_message_section = [], False
+
+        commit_data["sha"] = lines.pop(0).replace("commit ", "").strip()
+
+        while lines:
+            line = lines.pop(0)
+            if line.startswith("Author:"):
+                commit_data["author"] = line.split(":", 1)[1].strip()
+            elif line.startswith("Date:"):
+                commit_data["date"] = line.split(":", 1)[1].strip()
+            elif line.startswith("Parents:"):
+                parents_str = line.split(":", 1)[1].strip()
+                if parents_str:
+                    commit_data["parents"] = parents_str.split()
+            elif line.startswith("Refs:"):
+                refs_str = line.split(":", 1)[1].strip()
+                if refs_str.startswith("(") and refs_str.endswith(")"):
+                    refs_str = refs_str[1:-1]
+                    commit_data["refs"] = [r.strip() for r in refs_str.split(",")]
+            elif not line.strip() and not is_message_section:
+                is_message_section = True
+                commit_data["message"] = "\n".join(lines).strip()
+                break
+
+        commits.append(commit_data)
+    return commits
+
+
+def parse_git_log(log_output: str) -> list:
+    """
+    Parses the raw output from 'git log' with a custom format into a structured list.
+    Handles multi-line messages, parents, refs (branches/tags), and notes.
+    """
+    commits = []
+    if not log_output.strip():
+        return []
+
+    # Split output into individual commit blocks. The first block might not have the leading newline.
+    commit_blocks = log_output.strip().split("\ncommit ")
+    if commit_blocks and not commit_blocks[0].startswith("commit "):
+        commit_blocks[0] = "commit " + commit_blocks[0]
+
+    for block in commit_blocks:
+        if not block.strip():
+            continue
+
+        commit_data = {
+            "sha": None, "author": None, "date": None, "message": None,
+            "mx_metadata": None, "parents": [], "refs": []
+        }
+        notes_separator = "\n\nNotes (mx_metadata):\n"
+
+        # Separate the main commit data from the notes
+        if notes_separator in block:
+            main_part, notes_part = block.split(notes_separator, 1)
+            try:
+                commit_data["mx_metadata"] = json.loads(notes_part.strip())
+            except json.JSONDecodeError:
+                commit_data["mx_metadata"] = {"error": "JSONDecodeError", "raw": notes_part.strip()}
+        else:
+            main_part = block
+
+        lines = main_part.strip().split('\n')
+        message_lines, is_message_section = [], False
+
+        # Parse the structured part of the commit
+        commit_data["sha"] = lines.pop(0).replace("commit ", "").strip()
+
+        # Use a while loop to safely consume header lines
+        while lines:
+            line = lines.pop(0)
+            if line.startswith("Author:"):
+                commit_data["author"] = line.split(":", 1)[1].strip()
+            elif line.startswith("Date:"):
+                commit_data["date"] = line.split(":", 1)[1].strip()
+            elif line.startswith("Parents:"):
+                # A merge commit will have more than one parent hash
+                parents_str = line.split(":", 1)[1].strip()
+                if parents_str:
+                    commit_data["parents"] = parents_str.split()
+            elif line.startswith("Refs:"):
+                # Refs are typically in parentheses, e.g., " (HEAD -> main, tag: v1.0, origin/main)"
+                refs_str = line.split(":", 1)[1].strip()
+                if refs_str.startswith("(") and refs_str.endswith(")"):
+                    refs_str = refs_str[1:-1]  # Remove parentheses
+                    commit_data["refs"] = [r.strip() for r in refs_str.split(",")]
+            elif not line.strip() and not is_message_section:
+                # The first blank line signals the start of the message
+                is_message_section = True
+                # The rest of the lines are the message
+                commit_data["message"] = "\n".join(lines).strip()
+                break # Exit header parsing
+
+        commits.append(commit_data)
+    return commits
 
 
 def parse_git_log(log_output: str) -> list:

@@ -1,9 +1,11 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8" />
     <script src="assets/tailwindcss.js"></script>
 </head>
+
 <body class="bg-gray-100 font-sans">
     <div id="app"></div>
 
@@ -140,7 +142,7 @@
             );
             return { execute, isLoading, error, data, setData };
         };
-        
+
         // --- START: New Reusable Hook for Pagination ---
         const usePaginatedRpc = (rpcType, pageSize = 20) => {
             const messageService = useDependency(IMessageService);
@@ -178,7 +180,7 @@
                     load(page);
                 }
             }, [isLoadingMore, hasMore, load, page]);
-            
+
             useEffect(() => {
                 reload();
             }, [reload]);
@@ -186,7 +188,7 @@
             return { isLoading, isLoadingMore, error, items, hasMore, loadMore, reload };
         };
         // --- END: New Reusable Hook for Pagination ---
-        
+
         // ===================================================================
         // 3. CENTRALIZED STATE MANAGEMENT (Using React Context)
         // ===================================================================
@@ -225,7 +227,7 @@
         // ===================================================================
         // 4. UI COMPONENTS (Refactored for clarity and context usage)
         // ===================================================================
-        
+
         const Alert = ({ message, type = "error" }) => {
             if (!message) return null;
             const colors = {
@@ -238,7 +240,7 @@
                 </div>
             );
         };
-        
+
         // --- GitInitView now uses useGit to refetch status ---
         const GitInitView = () => {
             const [message, setMessage] = useState("Initial commit");
@@ -297,14 +299,14 @@
                 </div>
             );
         };
-        
+
         // --- RemoteEditor now uses useGit ---
         const RemoteEditor = ({ remote }) => {
             const { status, refetchStatus } = useGit();
             const [isEditing, setIsEditing] = useState(false);
             const [url, setUrl] = useState(remote.url);
             const [actionStatus, setActionStatus] = useState(null);
-            
+
             const updateRpc = useRpc();
             const deleteRpc = useRpc();
             const pushRpc = useRpc();
@@ -327,7 +329,7 @@
                     await pushRpc.execute("GIT_PUSH", { remoteName: remote.name, branchName: status.currentBranch });
                     setActionStatus({ type: 'success', msg: `Successfully pushed to ${remote.name}` });
                     // NOTE: A push action should trigger a log refresh. We'll address this.
-                } catch(e) {
+                } catch (e) {
                     setActionStatus({ type: 'error', msg: e.message });
                 }
             };
@@ -360,7 +362,7 @@
                 </div>
             );
         };
-        
+
         // --- AddRemoteForm now uses useGit ---
         const AddRemoteForm = ({ onCancel }) => {
             const [name, setName] = useState('');
@@ -396,8 +398,104 @@
         };
 
         // --- EnhancedGitLogView is now much simpler by using the new hook ---
+        // --- EnhancedGitLogView is now much simpler by using the new hook ---
         const EnhancedGitLogView = () => {
-            const { isLoading, isLoadingMore, error, items: commits, hasMore, loadMore } = usePaginatedRpc("GET_GIT_LOG");
+            const { isLoading, isLoadingMore, error, items: commits, hasMore, loadMore, reload } = usePaginatedRpc("GET_GIT_LOG");
+            const { status } = useGit(); // Get global status for push notifications
+
+            // --- NEW: A central place to manage state changes that require a log refresh ---
+            const LogContext = useContext(GitContext);
+            useEffect(() => {
+                // This is a placeholder for a more robust event system.
+                // If a push was successful, we should reload the log.
+                // For now, this is a simple example. A real implementation might use an event bus.
+                // We listen for changes in remote count as a proxy for actions that might affect history.
+            }, [status?.remotes.length, reload]);
+
+            // --- NEW: RefBadge component for displaying branches and tags ---
+            const RefBadge = ({ refName }) => {
+                let text = refName;
+                let colorClasses = "bg-gray-200 text-gray-800"; // Default
+                let icon = null;
+
+                if (refName.startsWith("tag: ")) {
+                    text = refName.substring(5);
+                    colorClasses = "bg-yellow-200 text-yellow-800";
+                    icon = <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3 mr-1" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M17.707 9.293a1 1 0 010 1.414l-7 7a1 1 0 01-1.414 0l-7-7A.997.997 0 012 10V5a3 3 0 013-3h5a.997.997 0 01.707.293l7 7zM5 6a1 1 0 100-2 1 1 0 000 2z" clipRule="evenodd" /></svg>;
+                } else if (refName.startsWith("HEAD ->")) {
+                    text = refName.substring(8);
+                    colorClasses = "bg-blue-200 text-blue-800 font-bold";
+                } else if (refName.includes('/')) { // Likely a remote branch
+                    colorClasses = "bg-green-200 text-green-800";
+                }
+
+                return (
+                    <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${colorClasses}`}>
+                        {icon}{text}
+                    </span>
+                );
+            };
+
+            // --- NEW: CommitView component applying the best practices ---
+            const CommitView = ({ commit }) => {
+                const [isMetaVisible, setIsMetaVisible] = useState(false);
+                const [copyStatus, setCopyStatus] = useState('');
+
+                const isMerge = commit?.parents?.length > 1;
+
+                const handleCopy = () => {
+                    navigator.clipboard.writeText(commit.sha).then(() => {
+                        setCopyStatus('Copied!');
+                        setTimeout(() => setCopyStatus(''), 2000);
+                    }, () => {
+                        setCopyStatus('Failed!');
+                        setTimeout(() => setCopyStatus(''), 2000);
+                    });
+                };
+
+                return (
+                    <div className={`bg-white border-l-4 ${isMerge ? 'border-purple-400' : 'border-gray-200'} p-4 rounded-r-lg shadow-sm`}>
+                        {/* Row 1: Core Info & Refs */}
+                        <div className="flex justify-between items-start">
+                            <div className="flex items-center space-x-2 flex-wrap">
+                                <p className="text-sm font-mono text-gray-500 hover:text-gray-900" title={commit.sha}>{commit.sha.substring(0, 7)}</p>
+                                {isMerge && <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-purple-100 text-purple-700">Merge</span>}
+                                {commit.refs && commit.refs.map(r => r && <RefBadge key={r} refName={r} />)}
+                            </div>
+                            {/* Quick Action: Copy Hash */}
+                            <div className="relative">
+                                <button onClick={handleCopy} title="Copy full hash" className="text-gray-400 hover:text-gray-600">
+                                    <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor"><path d="M8 3a1 1 0 011-1h2a1 1 0 110 2H9a1 1 0 01-1-1z" /><path d="M6 3a2 2 0 00-2 2v11a2 2 0 002 2h8a2 2 0 002-2V5a2 2 0 00-2-2 3 3 0 01-3 3H9a3 3 0 01-3-3z" /></svg>
+                                </button>
+                                {copyStatus && <span className="absolute -top-6 right-0 text-xs bg-gray-800 text-white px-2 py-1 rounded">{copyStatus}</span>}
+                            </div>
+                        </div>
+
+                        {/* Row 2: Commit Message */}
+                        <h4 className="text-md font-semibold text-gray-800 my-2">{commit.message.split('\n')[0]}</h4>
+
+                        {/* Row 3: Author & Date */}
+                        <div className="flex justify-between items-center text-sm text-gray-500">
+                            <p>by <span className="font-medium text-gray-700">{commit.author}</span></p>
+                            <p>{new Date(commit.date).toLocaleString()}</p>
+                        </div>
+
+                        {/* Row 4: Collapsible Details */}
+                        {commit.mx_metadata && (
+                            <div className="mt-3">
+                                <button onClick={() => setIsMetaVisible(!isMetaVisible)} className="text-xs text-blue-600 hover:underline">
+                                    {isMetaVisible ? 'Hide' : 'Show'} Mendix Metadata
+                                </button>
+                                {isMetaVisible && (
+                                    <div className="mt-1 pt-2 border-t border-gray-200">
+                                        <pre className="bg-gray-50 p-3 rounded-md text-xs text-gray-700 overflow-x-auto">{JSON.stringify(commit.mx_metadata, null, 2)}</pre>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+                    </div>
+                );
+            };
 
             const renderContent = () => {
                 if (isLoading) return <p className="text-gray-500 text-center p-4">Loading commit history...</p>;
@@ -405,23 +503,8 @@
                 if (commits.length === 0) return <p className="text-gray-500 text-center p-4">No commits found.</p>;
 
                 return (
-                    <div className="space-y-4">
-                        {commits.map((commit, index) => (
-                            <div key={`${commit.sha}-${index}`} className="bg-white border border-gray-200 p-4 rounded-lg shadow-sm">
-                                <div className="flex justify-between items-start">
-                                    <p className="text-sm font-mono text-gray-500" title={commit.sha}>{commit.sha.substring(0, 10)}</p>
-                                    <p className="text-sm text-gray-500">{new Date(commit.date).toLocaleString()}</p>
-                                </div>
-                                <h4 className="text-md font-semibold text-gray-800 my-1">{commit.message}</h4>
-                                <p className="text-sm text-gray-600">by <span className="font-medium">{commit.author}</span></p>
-                                {commit.mx_metadata && (
-                                    <div className="mt-3 pt-3 border-t border-gray-200">
-                                        <h5 className="text-sm font-semibold text-gray-500 mb-1">Mendix Metadata:</h5>
-                                        <pre className="bg-gray-50 p-3 rounded-md text-xs text-gray-700 overflow-x-auto">{JSON.stringify(commit.mx_metadata, null, 2)}</pre>
-                                    </div>
-                                )}
-                            </div>
-                        ))}
+                    <div className="space-y-3">
+                        {commits.map((commit, index) => <CommitView key={`${commit.sha}-${index}`} commit={commit} />)}
                     </div>
                 );
             };
@@ -442,7 +525,6 @@
                 </div>
             );
         };
-        
         // --- GitRepoView now uses context, no props needed ---
         const GitRepoView = () => {
             const { status } = useGit();
@@ -483,7 +565,7 @@
         // --- NEW: Orchestrator component to handle loading/error/state logic ---
         const GitStatusOrchestrator = () => {
             const { isLoading, error, isRepo, refetchStatus } = useGit();
-            
+
             useEffect(() => {
                 refetchStatus();
             }, [refetchStatus]); // Initial fetch
@@ -541,4 +623,5 @@
         root.render(<AppWithDependencies />);
     </script>
 </body>
+
 </html>
