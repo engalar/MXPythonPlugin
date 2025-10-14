@@ -1,12 +1,3 @@
-import subprocess
-import sys
-import threading
-import uuid
-import time
-from dependency_injector import containers, providers
-from System.Text.Json import JsonSerializer
-import re
-
 # region FRAMEWORK CODE
 import json
 import traceback
@@ -17,6 +8,10 @@ from abc import ABC, abstractmethod
 import clr
 clr.AddReference("System.Text.Json")
 clr.AddReference("Mendix.StudioPro.ExtensionsAPI")
+import threading
+import uuid
+from dependency_injector import containers, providers
+from System.Text.Json import JsonSerializer
 # ShowDevTools()
 
 # ===================================================================
@@ -118,6 +113,7 @@ class AppController:
 # To add a new feature, create a new class implementing ICommandHandler
 # or IAsyncCommandHandler, and register it in the Container below.
 # -------------------------------------------------------------------
+import time
 
 class SimulateTaskCommandHandler(IAsyncCommandHandler):
     """
