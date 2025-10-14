@@ -20,7 +20,7 @@
         // You should not need to modify this section to add new features.
         // -------------------------------------------------------------------
 
-        const { React, ReactDOM, redi, rediReact } = globalThis.__tmp;
+        const { React, ReactDOM, redi, rediReact, rxjs } = globalThis.__tmp;
         delete globalThis.__tmp;
 
         // keep unused import for redi and rediReact
@@ -68,6 +68,7 @@
             createContext,
             useContext,
         } = React;
+        const { BehaviorSubject } = rxjs;
         // 1. FRAMEWORK: CORE COMMUNICATION SERVICES
 
         const IBackendEventService = createIdentifier("IBackendEventService");
@@ -224,23 +225,127 @@
 
         // 4. FRAMEWORK: BOOTSTRAPPING AND VIEW MANAGEMENT
 
-        const IView = createIdentifier("IView");
-        class ViewManagementService {
-            constructor(views) { this.views = views; }
-            getViews() { return this.views; }
-        }
-        setDependencies(ViewManagementService, [[new Many(), IView]]);
+        // ===================================================================
+        // ================== NEW FRAMEWORK EXTENSIONS =======================
+        // ===================================================================
+        // 1. NEW: Frontend Event Bus Service
+        const IEventBus = createIdentifier("IEventBus");
+        // Using the same implementation as BackendEventService for simplicity
+        class EventBusService extends BackendEventService { }
+        setDependencies(EventBusService, []);
 
-        const App = () => {
-            const viewManager = useDependency(ViewManagementService);
+        // 2. REFACTORED: Panel Service powered by RxJS
+        const IPanel = createIdentifier("IPanel");
+        const IPanelService = createIdentifier("IPanelService");
+        class PanelService {
+            constructor(panels) {
+                this.allPanels = new Map(panels.map(p => [p.id, p]));
+
+                // Internal state managed by a BehaviorSubject
+                this._state$ = new BehaviorSubject(this.getInitialState());
+
+                // Publicly exposed observable stream of the state
+                this.state$ = this._state$.asObservable();
+            }
+
+            getInitialState() {
+                const initialOpenIds = new Set(
+                    Array.from(this.allPanels.values())
+                        .filter(p => p.defaultActive)
+                        .map(p => p.id)
+                );
+                const initialActiveId = Array.from(this.allPanels.values())
+                    .find(p => p.defaultActive)?.id || null;
+                return this._computeState(initialOpenIds, initialActiveId);
+            }
+
+            // Private method to compute the full state object from IDs
+            _computeState(openPanelIds, activePanelId) {
+                const openPanels = Array.from(openPanelIds)
+                    .map(id => this.allPanels.get(id))
+                    .filter(Boolean); // Filter out potential undefineds
+                const activePanel = activePanelId ? this.allPanels.get(activePanelId) : null;
+
+                return { openPanels, activePanel };
+            }
+
+            // Private method to update the stream
+            _updateState(newOpenIds, newActiveId) {
+                const newState = this._computeState(newOpenIds, newActiveId);
+                this._state$.next(newState);
+            }
+
+            // --- Public API for Panel Control ---
+            openPanel(id) {
+                if (!this.allPanels.has(id)) return;
+
+                const currentState = this._state$.getValue();
+                const currentOpenIds = new Set(currentState.openPanels.map(p => p.id));
+
+                if (currentOpenIds.has(id)) {
+                    this.setActivePanel(id);
+                    return;
+                }
+
+                currentOpenIds.add(id);
+                this._updateState(currentOpenIds, id);
+            }
+
+            closePanel(id) {
+                const currentState = this._state$.getValue();
+                const currentOpenIds = new Set(currentState.openPanels.map(p => p.id));
+                if (!currentOpenIds.has(id)) return;
+
+                currentOpenIds.delete(id);
+                let newActiveId = currentState.activePanel?.id;
+                if (newActiveId === id) {
+                    newActiveId = currentOpenIds.values().next().value || null;
+                }
+                this._updateState(currentOpenIds, newActiveId);
+            }
+
+            setActivePanel(id) {
+                const currentState = this._state$.getValue();
+                if (currentState.activePanel?.id === id) return;
+
+                const currentOpenIds = new Set(currentState.openPanels.map(p => p.id));
+                if (!currentOpenIds.has(id)) return; // Can't activate a panel that isn't open
+
+                this._updateState(currentOpenIds, id);
+            }
+        }
+        setDependencies(PanelService, [[new Many(), IPanel]]);
+
+        // 3. REFACTORED: The App Shell Component, now a pure projection of state
+        const AppShell = () => {
+            const panelService = useDependency(IPanelService);
+
+            // Subscribe to the state stream. The component will automatically re-render when the state changes.
+            const { openPanels, activePanel } = useObservable(
+                panelService.state$,
+                panelService.getInitialState()
+            );
+
             return (
-                <div className="p-4 max-w-4xl mx-auto bg-gray-50 shadow-lg rounded-lg mt-8">
-                    <h1 className="text-3xl font-bold text-gray-800 mb-6 text-center">
-                        Mendix Backend Control Panel
+                <div className="p-4 max-w-5xl mx-auto bg-gray-50 shadow-lg rounded-lg mt-8 flex flex-col h-[90vh]">
+                    <h1 className="text-3xl font-bold text-gray-800 mb-4 text-center">
+                        Mendix Portal Control Panel (RxJS)
                     </h1>
-                    {viewManager.getViews().map((ViewComponent, index) => (
-                        <Fragment key={index}><ViewComponent /></Fragment>
-                    ))}
+                    <div className="flex border-b border-gray-300">
+                        {openPanels.map(panel => (
+                            <button
+                                key={panel.id}
+                                onClick={() => panelService.setActivePanel(panel.id)}
+                                className={`px-4 py-2 text-sm font-medium border-b-2 ${panel.id === activePanel?.id ? 'border-purple-600 text-purple-700' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
+                            >
+                                {panel.title}
+                            </button>
+                        ))}
+                    </div>
+                    <div className="flex-grow p-4 bg-white overflow-y-auto">
+                        {/* More elegant rendering: directly use the selected activePanel from the state stream */}
+                        {activePanel ? <activePanel.component /> : <div className="text-center text-gray-500">No panel selected.</div>}
+                    </div>
                 </div>
             );
         };
@@ -263,68 +368,103 @@
         // it as an `IView` in the IOC Configuration section below.
         // -------------------------------------------------------------------
 
-        const SimulateTaskView = () => {
+        const SimulateTaskPanel = () => {
             const [seconds, setSeconds] = useState(5);
-            // Use the framework's hook to interact with the backend.
             const { execute, isLoading, error, data } = useCommand();
+            const eventBus = useDependency(IEventBus);
+            const panelService = useDependency(IPanelService);
 
             const handleStartTask = async () => {
                 const duration = parseInt(seconds, 10);
                 if (isNaN(duration) || duration <= 0) return;
-                // The component doesn't need to know if the task is sync or async.
-                execute("SIMULATE_TASK", { seconds: duration }).catch(() => { });
+
+                // Publish an event to the frontend event bus
+                eventBus.publish("task:started", { duration });
+                panelService.openPanel('logger'); // Programmatically open the logger panel
+
+                try {
+                    const result = await execute("SIMULATE_TASK", { seconds: duration });
+                    eventBus.publish("task:completed", { status: 'success', result });
+                } catch (err) {
+                    eventBus.publish("task:completed", { status: 'error', error: err.message });
+                }
             };
 
             return (
-                <div className="border-t border-gray-300 mt-6 pt-6">
+                <div>
                     <h2 className="text-xl font-semibold text-gray-700 mb-4">
                         Unified Task Runner
                     </h2>
                     <p className="text-sm text-gray-600 mb-4">
-                        Click the button to run a task. The UI remains responsive because
-                        the underlying command is handled asynchronously, but the calling
-                        code is simple and unified.
+                        This panel can run backend tasks and communicate with other panels via the Event Bus.
                     </p>
                     <div className="flex items-center space-x-3 p-4 bg-white border border-gray-200 rounded-lg">
-                        <input
-                            type="number"
-                            value={seconds}
-                            onChange={(e) => setSeconds(e.target.value)}
-                            className="w-24 px-3 py-2 border border-gray-300 rounded-md"
-                            disabled={isLoading}
-                        />
-                        <button
-                            onClick={handleStartTask}
-                            disabled={isLoading}
-                            className="px-4 py-2 bg-purple-600 text-white font-semibold rounded-md hover:bg-purple-700 disabled:bg-purple-300 disabled:cursor-not-allowed w-48 text-center"
-                        >
-                            {isLoading ? `Running (${seconds}s)...` : "Start Unified Task"}
+                        <input type="number" value={seconds} onChange={(e) => setSeconds(e.target.value)} className="w-24 px-3 py-2 border border-gray-300 rounded-md" disabled={isLoading} />
+                        <button onClick={handleStartTask} disabled={isLoading} className="px-4 py-2 bg-purple-600 text-white font-semibold rounded-md hover:bg-purple-700 disabled:bg-purple-300 disabled:cursor-not-allowed w-48 text-center">
+                            {isLoading ? `Running (${seconds}s)...` : "Start Task & Open Logger"}
                         </button>
                     </div>
                     <div className="mt-3 h-6">
                         {error && <Alert message={error} type="error" />}
-                        {data && !isLoading && (
-                            <Alert message={data.message} type="success" />
-                        )}
+                        {data && !isLoading && <Alert message={data.message} type="success" />}
                     </div>
                 </div>
             );
         };
 
+        // Panel 2: A logger that listens to events from other panels
+        const LoggerPanel = () => {
+            const eventBus = useDependency(IEventBus);
+            const [logs, setLogs] = useState([]);
+
+            useEffect(() => {
+                const addLog = (logEntry) => {
+                    const timestamp = new Date().toLocaleTimeString();
+                    setLogs(prev => [...prev, { ...logEntry, timestamp }]);
+                };
+
+                const subscriptions = [
+                    eventBus.subscribe("task:started", (data) => addLog({ type: "info", message: `Task started. Duration: ${data.duration}s` })),
+                    eventBus.subscribe("task:completed", (data) => {
+                        if (data.status === 'success') {
+                            addLog({ type: "success", message: `Task completed successfully: ${data.result.message}` });
+                        } else {
+                            addLog({ type: "error", message: `Task failed: ${data.error}` });
+                        }
+                    }),
+                ];
+
+                return () => subscriptions.forEach(unsubscribe => unsubscribe());
+            }, [eventBus]);
+
+            return (
+                <div>
+                    <h2 className="text-xl font-semibold text-gray-700 mb-4">Event Log</h2>
+                    <div className="space-y-2 p-3 bg-gray-800 text-white font-mono text-xs rounded-md h-64 overflow-y-auto">
+                        {logs.map((log, index) => (
+                            <p key={index} className={log.type === 'error' ? 'text-red-400' : log.type === 'success' ? 'text-green-400' : 'text-gray-300'}>
+                                [{log.timestamp}] {log.message}
+                            </p>
+                        ))}
+                    </div>
+                </div>
+            );
+        };
         // ===================================================================
         // ==============     IOC & APP INITIALIZATION     ===================
         // ===================================================================
 
-        const AppWithDependencies = connectDependencies(App, [
+        const AppWithDependencies = connectDependencies(AppShell, [
             // --- Framework Registrations ---
-            [ViewManagementService],
             [IBackendEventService, { useClass: BackendEventService }],
             [IMessageService, { useClass: BrowserMessageService }],
             [ICommandService, { useClass: CommandService }],
+            [IEventBus, { useClass: EventBusService }],
+            [IPanelService, { useClass: PanelService }],
 
-            // --- Business Logic Registrations ---
-            // To add a new view, simply add another line here like the one below.
-            [IView, { useValue: SimulateTaskView }],
+            // --- Business Logic Registrations (as Panels) ---
+            [IPanel, { useValue: { id: 'task-runner', title: 'Task Runner', component: SimulateTaskPanel, defaultActive: true } }],
+            [IPanel, { useValue: { id: 'logger', title: 'Event Logger', component: LoggerPanel, defaultActive: true } }],
         ]);
 
         const root = ReactDOM.createRoot(document.getElementById("app"));
