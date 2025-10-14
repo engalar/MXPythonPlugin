@@ -12,6 +12,14 @@
     <script src="assets/vendor-bundle.umd.js"></script>
     <script src="assets/babel.min.js"></script>
     <script type="text/babel">
+
+        // ===================================================================
+        // ===================     FRAMEWORK CODE     ========================
+        // ===================================================================
+        // This section contains the reusable, application-agnostic core.
+        // You should not need to modify this section to add new features.
+        // -------------------------------------------------------------------
+
         const { React, ReactDOM, redi, rediReact } = globalThis.__tmp;
         delete globalThis.__tmp;
 
@@ -60,12 +68,8 @@
             createContext,
             useContext,
         } = React;
+        // 1. FRAMEWORK: CORE COMMUNICATION SERVICES
 
-        // ===================================================================
-        // 1. STATE & COMMUNICATION SERVICES
-        // ===================================================================
-
-        // --- START: New Service for Backend-Pushed Events ---
         const IBackendEventService = createIdentifier("IBackendEventService");
         class BackendEventService {
             constructor() {
@@ -77,8 +81,6 @@
                     this.subscribers.set(eventType, new Set());
                 }
                 this.subscribers.get(eventType).add(callback);
-
-                // Return an unsubscribe function
                 return () => {
                     const eventSubscribers = this.subscribers.get(eventType);
                     if (eventSubscribers) {
@@ -95,11 +97,9 @@
             }
         }
         setDependencies(BackendEventService, []);
-        // --- END: New Service for Backend-Pushed Events ---
 
         const IMessageService = createIdentifier("IMessageService");
         class BrowserMessageService {
-            // It now only publishes events, no longer managing RPC promises itself.
             constructor(eventService) {
                 this.eventService = eventService;
                 this.requestId = 0;
@@ -107,33 +107,21 @@
                 this.initializeListener();
             }
             async call(type, payload) {
-                // The signature is the same, but it's used differently
                 const correlationId = `req-${this.requestId++}`;
-                const command = {
-                    type,
-                    payload,
-                    correlationId,
-                    timestamp: new Date().toISOString(),
-                };
+                const command = { type, payload, correlationId, timestamp: new Date().toISOString() };
                 window.parent.sendMessage("frontend:message", command);
-                return correlationId; // Returns correlationId for the CommandService to track
+                return correlationId;
             }
             initializeListener() {
                 window.addEventListener("message", this.handleBackendResponse);
             }
             handleBackendResponse(event) {
                 if (event.data && event.data.type === "backendResponse") {
-                    // not backend:response actual
                     try {
                         const response = JSON.parse(event.data.data);
-                        // Publish the entire response as a generic event
                         this.eventService.publish("backendResponse", response);
                     } catch (e) {
-                        console.error(
-                            "Fatal error parsing backend response:",
-                            e,
-                            event.data.data
-                        );
+                        console.error("Fatal error parsing backend response:", e, event.data.data);
                     }
                 }
             }
@@ -143,150 +131,148 @@
         }
         setDependencies(BrowserMessageService, [IBackendEventService]);
 
-        const IView = createIdentifier("IView");
-        class ViewManagementService {
-            constructor(views) {
-                this.views = views;
-            }
-            getViews() {
-                return this.views;
-            }
-        }
-        setDependencies(ViewManagementService, [[new Many(), IView]]);
+        // 2. FRAMEWORK: HIGH-LEVEL COMMAND ABSTRACTION
 
-        // ===================================================================
-        // 2. REUSABLE HOOKS (Centralized stateful logic)
-        // ===================================================================
-
-        // --- START: New High-Level Command Service ---
         const ICommandService = createIdentifier("ICommandService");
         class CommandService {
             constructor(messageService, eventService) {
                 this.messageService = messageService;
-                this.pendingCommands = new Map(); // For both sync RPC and async tasks
+                this.pendingCommands = new Map();
                 this.RPC_TIMEOUT = 10000;
                 this.handleBackendResponse = this.handleBackendResponse.bind(this);
-
                 eventService.subscribe("backendResponse", this.handleBackendResponse);
             }
 
             execute = (type, payload) => {
                 return new Promise(async (resolve, reject) => {
                     const commandId = await this.messageService.call(type, payload);
-
                     const timeoutId = setTimeout(() => {
                         if (this.pendingCommands.has(commandId)) {
                             this.pendingCommands.delete(commandId);
                             reject(new Error(`Command '${type}' timed out.`));
                         }
                     }, this.RPC_TIMEOUT);
-
-                    this.pendingCommands.set(commandId, {
-                        resolve,
-                        reject,
-                        timeoutId,
-                        type,
-                    });
+                    this.pendingCommands.set(commandId, { resolve, reject, timeoutId, type });
                 });
             };
 
             handleBackendResponse(response) {
                 const { correlationId, taskId } = response;
-                const commandId = correlationId || taskId;
-
-                if (!commandId || !this.pendingCommands.has(commandId)) {
-                    return; // Not a command we are waiting for, or it's an async completion
-                }
-
-                // --- Logic for Sync RPC response ---
-                if (correlationId) {
-                    const cmd =
-                        this.pendingCommands.get(correlationId);
-                    clearTimeout(cmd.timeoutId);
-                    this.pendingCommands.delete(correlationId);
-
+                if (correlationId && this.pendingCommands.has(correlationId)) {
+                    // Sync RPC or Async Task Initiation
+                    const cmd = this.pendingCommands.get(correlationId);
                     if (response.status === "success") {
-                        // Check if it's an async task starting up
                         if (response.data && response.data.taskId) {
+                            // It's an async task starting. Transfer promise to the new taskId.
                             const newTaskId = response.data.taskId;
-                            // Transfer the promise handlers to the new taskId
-                            const commandState = this.pendingCommands.get(
-                                correlationId
-                            ) || { resolve: cmd.resolve, reject: cmd.reject, timeoutId: cmd.timeoutId };
-                            this.pendingCommands.set(newTaskId, {
-                                ...commandState,
-                                type: "async-task",
-                            });
+                            this.pendingCommands.delete(correlationId); // remove old correlationId
+                            this.pendingCommands.set(newTaskId, cmd); // re-map with taskId
                         } else {
+                            // It's a normal sync RPC response.
+                            clearTimeout(cmd.timeoutId);
+                            this.pendingCommands.delete(correlationId);
                             cmd.resolve(response.data);
                         }
                     } else {
-                        cmd.reject(
-                            new Error(
-                                response.message || "An unknown backend error occurred."
-                            )
-                        );
+                        // Error on initiation
+                        clearTimeout(cmd.timeoutId);
+                        this.pendingCommands.delete(correlationId);
+                        cmd.reject(new Error(response.message || "An unknown backend error occurred."));
                     }
-                }
-                // --- Logic for Async task completion response ---
-                else if (taskId) {
-                    const cmd2 = this.pendingCommands.get(taskId);// babel issue, i should use diff var name
-                    clearTimeout(cmd2.timeoutId); // In case we want a total task timeout
+                } else if (taskId && this.pendingCommands.has(taskId)) {
+                    // Async Task Completion
+                    const cmd = this.pendingCommands.get(taskId);
+                    clearTimeout(cmd.timeoutId); // In case we want a total task timeout
                     this.pendingCommands.delete(taskId);
 
                     if (response.status === "success") {
-                        cmd2.resolve(response.data);
+                        cmd.resolve(response.data);
                     } else {
-                        cmd2.reject(new Error(response.message || "Async task failed."));
+                        cmd.reject(new Error(response.message || "Async task failed."));
                     }
                 }
             }
         }
         setDependencies(CommandService, [IMessageService, IBackendEventService]);
-        // --- END: New High-Level Command Service ---
 
-        // --- START: The ONLY hook UI components need to use ---
+        // 3. FRAMEWORK: UNIFIED REACT HOOK FOR UI COMPONENTS
+
         const useCommand = () => {
             const commandService = useDependency(ICommandService);
             const [isLoading, setIsLoading] = useState(false);
             const [error, setError] = useState(null);
             const [data, setData] = useState(null);
 
-            const execute = useCallback(
-                async (type, payload) => {
-                    setIsLoading(true);
-                    setError(null);
-                    setData(null);
-                    try {
-                        const result = await commandService.execute(type, payload);
-                        setData(result);
-                        return result;
-                    } catch (err) {
-                        setError(err.message);
-                        throw err;
-                    } finally {
-                        setIsLoading(false);
-                    }
-                },
-                [commandService]
-            );
+            const execute = useCallback(async (type, payload) => {
+                setIsLoading(true);
+                setError(null);
+                setData(null);
+                try {
+                    const result = await commandService.execute(type, payload);
+                    setData(result);
+                    return result;
+                } catch (err) {
+                    setError(err.message);
+                    throw err;
+                } finally {
+                    setIsLoading(false);
+                }
+            }, [commandService]);
+
             return { execute, isLoading, error, data };
         };
-        // --- END: Unified Hook ---
 
-        // --- START: New Component for Simulating Long Tasks ---
+        // 4. FRAMEWORK: BOOTSTRAPPING AND VIEW MANAGEMENT
+
+        const IView = createIdentifier("IView");
+        class ViewManagementService {
+            constructor(views) { this.views = views; }
+            getViews() { return this.views; }
+        }
+        setDependencies(ViewManagementService, [[new Many(), IView]]);
+
+        const App = () => {
+            const viewManager = useDependency(ViewManagementService);
+            return (
+                <div className="p-4 max-w-4xl mx-auto bg-gray-50 shadow-lg rounded-lg mt-8">
+                    <h1 className="text-3xl font-bold text-gray-800 mb-6 text-center">
+                        Mendix Backend Control Panel
+                    </h1>
+                    {viewManager.getViews().map((ViewComponent, index) => (
+                        <Fragment key={index}><ViewComponent /></Fragment>
+                    ))}
+                </div>
+            );
+        };
+
+        const Alert = ({ message, type }) => {
+            const baseClasses = "text-sm px-4 py-2 rounded-md";
+            const typeClasses = {
+                success: "bg-green-100 text-green-800",
+                error: "bg-red-100 text-red-800",
+            };
+            return <div className={`${baseClasses} ${typeClasses[type]}`}>{message}</div>;
+        };
+
+
+        // ===================================================================
+        // ===============     BUSINESS LOGIC CODE     =======================
+        // ===================================================================
+        // This section contains your feature-specific components (Views).
+        // To add a new feature, add your new Component here and register
+        // it as an `IView` in the IOC Configuration section below.
+        // -------------------------------------------------------------------
+
         const SimulateTaskView = () => {
             const [seconds, setSeconds] = useState(5);
-            // --- The component now uses the simple, unified hook ---
+            // Use the framework's hook to interact with the backend.
             const { execute, isLoading, error, data } = useCommand();
 
             const handleStartTask = async () => {
                 const duration = parseInt(seconds, 10);
                 if (isNaN(duration) || duration <= 0) return;
-                // The call is identical for sync or async. The hook handles the complexity.
-                execute("SIMULATE_TASK", { seconds: duration }).then(data => {
-                    console.log(data);
-                }).catch(() => { });
+                // The component doesn't need to know if the task is sync or async.
+                execute("SIMULATE_TASK", { seconds: duration }).catch(() => { });
             };
 
             return (
@@ -323,32 +309,21 @@
                     </div>
                 </div>
             );
-        }; // --- END: New Component for Simulating Long Tasks ---
-        // ===================================================================
-        // 5. MAIN APP & IOC CONFIGURATION (No changes needed)
-        // ===================================================================
-        const App = () => {
-            const viewManager = useDependency(ViewManagementService);
-            return (
-                <div className="p-4 max-w-4xl mx-auto bg-gray-50 shadow-lg rounded-lg mt-8">
-                    <h1 className="text-3xl font-bold text-gray-800 mb-6 text-center">
-                        Mendix Backend Control Panel
-                    </h1>
-                    {viewManager.getViews().map((ViewComponent, index) => (
-                        <Fragment key={index}>
-                            <ViewComponent />
-                        </Fragment>
-                    ))}
-                </div>
-            );
         };
 
+        // ===================================================================
+        // ==============     IOC & APP INITIALIZATION     ===================
+        // ===================================================================
+
         const AppWithDependencies = connectDependencies(App, [
+            // --- Framework Registrations ---
             [ViewManagementService],
-            // --- MODIFIED: Register the new event service ---
             [IBackendEventService, { useClass: BackendEventService }],
             [IMessageService, { useClass: BrowserMessageService }],
             [ICommandService, { useClass: CommandService }],
+
+            // --- Business Logic Registrations ---
+            // To add a new view, simply add another line here like the one below.
             [IView, { useValue: SimulateTaskView }],
         ]);
 
