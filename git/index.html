@@ -428,132 +428,169 @@
                 </div>
             );
         };
-        const EnhancedGitLogView = () => {
-            const { isLoading, isLoadingMore, error, items: commits, hasMore, loadMore, reload } = usePaginatedCommits();
-            const { status } = useGit(); // Get global status for push notifications
 
-            // --- NEW: A central place to manage state changes that require a log refresh ---
-            const LogContext = useContext(GitContext);
-            useEffect(() => {
-                // This is a placeholder for a more robust event system.
-                // If a push was successful, we should reload the log.
-                // For now, this is a simple example. A real implementation might use an event bus.
-                // We listen for changes in remote count as a proxy for actions that might affect history.
-            }, [status?.remotes.length, reload]);
+        const DiffResultDisplay = ({ result }) => {
+            if (!result || !result.unitDifferences || result.unitDifferences.length === 0) {
+                return <div className="p-4 text-center text-gray-500 bg-gray-50 rounded-lg">No differences found between the selected commits.</div>;
+            }
 
-            // --- NEW: RefBadge component for displaying branches and tags ---
-            const RefBadge = ({ refName }) => {
-                let text = refName;
-                let colorClasses = "bg-gray-200 text-gray-800"; // Default
-                let icon = null;
+            const ChangeDetail = ({ detail }) => (
+                <li className="ml-4 text-sm">
+                    <span className="font-semibold">{detail.changeDescription}:</span>
+                    {detail.property && <span className="font-mono text-xs bg-gray-100 p-0.5 rounded ml-1">{detail.property}</span>}
+                    {detail.baseValue && <div className="text-red-600 ml-2">- {detail.baseValue}</div>}
+                    {detail.mineValue && <div className="text-green-600 ml-2">+ {detail.mineValue}</div>}
+                    {detail.changeDetails && detail.changeDetails.length > 0 && (
+                        <ul className="pl-4 border-l-2 border-gray-200">
+                            {detail.changeDetails.map((subDetail, i) => <ChangeDetail key={i} detail={subDetail} />)}
+                        </ul>
+                    )}
+                </li>
+            );
 
-                if (refName.startsWith("tag: ")) {
-                    text = refName.substring(5);
-                    colorClasses = "bg-yellow-200 text-yellow-800";
-                    icon = <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3 mr-1" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M17.707 9.293a1 1 0 010 1.414l-7 7a1 1 0 01-1.414 0l-7-7A.997.997 0 012 10V5a3 3 0 013-3h5a.997.997 0 01.707.293l7 7zM5 6a1 1 0 100-2 1 1 0 000 2z" clipRule="evenodd" /></svg>;
-                } else if (refName.startsWith("HEAD ->")) {
-                    text = refName.substring(8);
-                    colorClasses = "bg-blue-200 text-blue-800 font-bold";
-                } else if (refName.includes('/')) { // Likely a remote branch
-                    colorClasses = "bg-green-200 text-green-800";
-                }
-
-                return (
-                    <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${colorClasses}`}>
-                        {icon}{text}
-                    </span>
-                );
+            const ChangeBadge = ({ changeType }) => {
+                const styles = {
+                    'Added': 'bg-green-100 text-green-800',
+                    'Deleted': 'bg-red-100 text-red-800',
+                    'Modified': 'bg-yellow-100 text-yellow-800',
+                    'Moved': 'bg-blue-100 text-blue-800'
+                };
+                return <span className={`px-2 py-0.5 text-xs font-medium rounded-full ${styles[changeType] || 'bg-gray-100 text-gray-800'}`}>{changeType}</span>;
             };
 
-            // --- NEW: CommitView component applying the best practices ---
-            const CommitView = ({ commit }) => {
+            return (
+                <div className="mt-6 p-4 border border-gray-300 rounded-lg bg-white shadow-inner">
+                    <h3 className="text-lg font-semibold text-gray-800 mb-3">Comparison Result</h3>
+                    <div className="space-y-4">
+                        {result.unitDifferences.map((diff, index) => (
+                            <div key={diff.id || index} className="p-3 bg-gray-50 rounded-md border border-gray-200">
+                                <div className="flex justify-between items-center mb-2">
+                                    <p className="font-semibold text-gray-700">{diff.type}</p>
+                                    <ChangeBadge changeType={diff.change} />
+                                </div>
+                                <p className="text-xs font-mono text-gray-500 mb-2" title={diff.id}>{diff.id}</p>
+                                {diff.changeDetails && diff.changeDetails.length > 0 && (
+                                    <ul className="list-disc list-inside space-y-1">
+                                        {diff.changeDetails.map((detail, i) => <ChangeDetail key={i} detail={detail} />)}
+                                    </ul>
+                                )}
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            );
+        };
+
+        const DiffControlPanel = ({ selected, onCompare, onClear, isLoading }) => {
+            const canCompare = selected.a && selected.b;
+            return (
+                <div className="p-4 bg-blue-50 border border-blue-200 rounded-lg mb-4 sticky top-0 z-10 shadow-sm">
+                    <div className="flex justify-between items-center">
+                        <div className="flex-grow space-y-1">
+                            <div className="flex items-center">
+                                <span className="font-bold text-blue-800 w-4">A:</span>
+                                {selected.a ? <span className="font-mono text-sm text-gray-700">{selected.a.sha.substring(0, 7)} - {selected.a.message.split('\n')[0]}</span> : <span className="text-gray-500 text-sm">Select a base commit from the list below.</span>}
+                            </div>
+                            <div className="flex items-center">
+                                <span className="font-bold text-green-800 w-4">B:</span>
+                                {selected.b ? <span className="font-mono text-sm text-gray-700">{selected.b.sha.substring(0, 7)} - {selected.b.message.split('\n')[0]}</span> : <span className="text-gray-500 text-sm">Select a commit to compare.</span>}
+                            </div>
+                        </div>
+                        <div className="flex items-center space-x-2">
+                            <button onClick={onClear} className="text-sm text-gray-600 hover:text-gray-800">Clear</button>
+                            <button onClick={onCompare} disabled={!canCompare || isLoading} className="px-4 py-2 bg-green-600 text-white font-semibold rounded-md hover:bg-green-700 disabled:bg-green-300">
+                                {isLoading ? 'Comparing...' : 'Compare A vs B'}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        const EnhancedGitLogView = () => {
+            const { isLoading, isLoadingMore, error, items: commits, hasMore, loadMore } = usePaginatedCommits();
+            const { execute: runDiff, isLoading: isDiffing, error: diffError, data: diffResult } = useCommand();
+            const [selectedCommits, setSelectedCommits] = useState({ a: null, b: null });
+
+            const RefBadge = ({ refName }) => {
+                let text = refName; let colorClasses = "bg-gray-200 text-gray-800"; let icon = null;
+                if (refName.startsWith("tag: ")) { text = refName.substring(5); colorClasses = "bg-yellow-200 text-yellow-800"; icon = <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3 mr-1" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M17.707 9.293a1 1 0 010 1.414l-7 7a1 1 0 01-1.414 0l-7-7A.997.997 0 012 10V5a3 3 0 013-3h5a.997.997 0 01.707.293l7 7zM5 6a1 1 0 100-2 1 1 0 000 2z" clipRule="evenodd" /></svg>; } else if (refName.startsWith("HEAD ->")) { text = refName.substring(8); colorClasses = "bg-blue-200 text-blue-800 font-bold"; } else if (refName.includes('/')) { colorClasses = "bg-green-200 text-green-800"; }
+                return <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${colorClasses}`}>{icon}{text}</span>;
+            };
+
+            const CommitView = ({ commit, onSelect, selection }) => {
                 const [isMetaVisible, setIsMetaVisible] = useState(false);
                 const [copyStatus, setCopyStatus] = useState('');
-
                 const isMerge = commit?.parents?.length > 1;
+                const isSelectedA = selection.a?.sha === commit.sha;
+                const isSelectedB = selection.b?.sha === commit.sha;
+                let borderClass = 'border-gray-200';
+                if (isSelectedA) borderClass = 'border-blue-500 ring-2 ring-blue-300';
+                if (isSelectedB) borderClass = 'border-green-500 ring-2 ring-green-300';
 
-                const handleCopy = () => {
-                    navigator.clipboard.writeText(commit.sha).then(() => {
-                        setCopyStatus('Copied!');
-                        setTimeout(() => setCopyStatus(''), 2000);
-                    }, () => {
-                        setCopyStatus('Failed!');
-                        setTimeout(() => setCopyStatus(''), 2000);
-                    });
-                };
+                const handleCopy = () => { navigator.clipboard.writeText(commit.sha).then(() => { setCopyStatus('Copied!'); setTimeout(() => setCopyStatus(''), 2000); }); };
 
                 return (
-                    <div className={`bg-white border-l-4 ${isMerge ? 'border-purple-400' : 'border-gray-200'} p-4 rounded-r-lg shadow-sm`}>
-                        {/* Row 1: Core Info & Refs */}
+                    <div className={`bg-white border-l-4 ${isMerge ? 'border-purple-400' : ''} p-4 rounded-r-lg shadow-sm transition-all ${borderClass}`}>
                         <div className="flex justify-between items-start">
                             <div className="flex items-center space-x-2 flex-wrap">
                                 <p className="text-sm font-mono text-gray-500 hover:text-gray-900" title={commit.sha}>{commit.sha.substring(0, 7)}</p>
                                 {isMerge && <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-purple-100 text-purple-700">Merge</span>}
                                 {commit.refs && commit.refs.map(r => r && <RefBadge key={r} refName={r} />)}
                             </div>
-                            {/* Quick Action: Copy Hash */}
-                            <div className="relative">
-                                <button onClick={handleCopy} title="Copy full hash" className="text-gray-400 hover:text-gray-600">
-                                    <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor"><path d="M8 3a1 1 0 011-1h2a1 1 0 110 2H9a1 1 0 01-1-1z" /><path d="M6 3a2 2 0 00-2 2v11a2 2 0 002 2h8a2 2 0 002-2V5a2 2 0 00-2-2 3 3 0 01-3 3H9a3 3 0 01-3-3z" /></svg>
-                                </button>
-                                {copyStatus && <span className="absolute -top-6 right-0 text-xs bg-gray-800 text-white px-2 py-1 rounded">{copyStatus}</span>}
-                            </div>
+                            <div className="relative"><button onClick={handleCopy} title="Copy full hash" className="text-gray-400 hover:text-gray-600"><svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor"><path d="M8 3a1 1 0 011-1h2a1 1 0 110 2H9a1 1 0 01-1-1z" /><path d="M6 3a2 2 0 00-2 2v11a2 2 0 002 2h8a2 2 0 002-2V5a2 2 0 00-2-2 3 3 0 01-3 3H9a3 3 0 01-3-3z" /></svg></button>{copyStatus && <span className="absolute -top-6 right-0 text-xs bg-gray-800 text-white px-2 py-1 rounded">{copyStatus}</span>}</div>
                         </div>
-
-                        {/* Row 2: Commit Message */}
                         <h4 className="text-md font-semibold text-gray-800 my-2">{commit.message.split('\n')[0]}</h4>
-
-                        {/* Row 3: Author & Date */}
                         <div className="flex justify-between items-center text-sm text-gray-500">
-                            <p>by <span className="font-medium text-gray-700">{commit.author}</span></p>
-                            <p>{new Date(commit.date).toLocaleString()}</p>
+                            <p>by <span className="font-medium text-gray-700">{commit.author}</span></p><p>{new Date(commit.date).toLocaleString()}</p>
                         </div>
-
-                        {/* Row 4: Collapsible Details */}
-                        {commit.mx_metadata && (
-                            <div className="mt-3">
-                                <button onClick={() => setIsMetaVisible(!isMetaVisible)} className="text-xs text-blue-600 hover:underline">
-                                    {isMetaVisible ? 'Hide' : 'Show'} Mendix Metadata
-                                </button>
-                                {isMetaVisible && (
-                                    <div className="mt-1 pt-2 border-t border-gray-200">
-                                        <pre className="bg-gray-50 p-3 rounded-md text-xs text-gray-700 overflow-x-auto">{JSON.stringify(commit.mx_metadata, null, 2)}</pre>
-                                    </div>
-                                )}
+                        <div className="mt-3 pt-2 border-t border-gray-200 flex justify-between items-center">
+                            {commit.mx_metadata ? <button onClick={() => setIsMetaVisible(!isMetaVisible)} className="text-xs text-blue-600 hover:underline">{isMetaVisible ? 'Hide' : 'Show'} Mendix Metadata</button> : <div />}
+                            <div className="space-x-2">
+                                <button onClick={() => onSelect('a', commit)} disabled={isSelectedA} className="px-2 py-1 text-xs font-semibold text-white bg-blue-500 rounded hover:bg-blue-600 disabled:bg-blue-300 disabled:cursor-not-allowed">Set as A</button>
+                                <button onClick={() => onSelect('b', commit)} disabled={isSelectedB} className="px-2 py-1 text-xs font-semibold text-white bg-green-500 rounded hover:bg-green-600 disabled:bg-green-300 disabled:cursor-not-allowed">Set as B</button>
                             </div>
-                        )}
+                        </div>
+                        {isMetaVisible && <div className="mt-2"><pre className="bg-gray-50 p-3 rounded-md text-xs text-gray-700 overflow-x-auto">{JSON.stringify(commit.mx_metadata, null, 2)}</pre></div>}
                     </div>
                 );
             };
 
-            const renderContent = () => {
+            const handleSelectCommit = (slot, commit) => setSelectedCommits(prev => ({ ...prev, [slot]: commit }));
+            const handleClearSelection = () => setSelectedCommits({ a: null, b: null });
+            const handleCompare = () => {
+                const { a, b } = selectedCommits;
+                if (a && b) {
+                    const oldCommit = new Date(a.date) <= new Date(b.date) ? a.sha : b.sha;
+                    const newCommit = new Date(a.date) <= new Date(b.date) ? b.sha : a.sha;
+                    runDiff("GIT_DIFF_COMMITS", { oldCommit, newCommit });
+                }
+            };
+
+            const renderLogContent = () => {
                 if (isLoading) return <p className="text-gray-500 text-center p-4">Loading commit history...</p>;
                 if (error && commits.length === 0) return <Alert message={error} />;
                 if (commits.length === 0) return <p className="text-gray-500 text-center p-4">No commits found.</p>;
-
-                return (
-                    <div className="space-y-3">
-                        {commits.map((commit, index) => <CommitView key={`${commit.sha}-${index}`} commit={commit} />)}
-                    </div>
-                );
+                return <div className="space-y-3">{commits.map(commit => <CommitView key={commit.sha} commit={commit} onSelect={handleSelectCommit} selection={selectedCommits} />)}</div>;
             };
 
             return (
                 <div className="border-t border-gray-200 mt-4 pt-4">
-                    <h2 className="text-xl font-semibold text-gray-700 mb-4">Commit History</h2>
-                    {renderContent()}
+                    <h2 className="text-xl font-semibold text-gray-700 mb-4">Commit History & Comparison</h2>
+                    <DiffControlPanel selected={selectedCommits} onCompare={handleCompare} onClear={handleClearSelection} isLoading={isDiffing} />
+                    {isDiffing && <p className="text-center p-4 text-blue-600">Generating diff, this may take a moment...</p>}
+                    {diffError && <Alert message={diffError} />}
+                    {diffResult && <DiffResultDisplay result={diffResult} />}
+                    <div className="mt-6">{renderLogContent()}</div>
                     <div className="mt-6 text-center">
-                        {hasMore && (
-                            <button onClick={loadMore} disabled={isLoadingMore} className="px-4 py-2 bg-blue-600 text-white font-semibold rounded-md hover:bg-blue-700 disabled:bg-blue-300">
-                                {isLoadingMore ? 'Loading More...' : 'Load More'}
-                            </button>
-                        )}
+                        {hasMore && (<button onClick={loadMore} disabled={isLoadingMore} className="px-4 py-2 bg-blue-600 text-white font-semibold rounded-md hover:bg-blue-700 disabled:bg-blue-300">{isLoadingMore ? 'Loading More...' : 'Load More'}</button>)}
                         {error && commits.length > 0 && <Alert message={error} />}
                         {!hasMore && commits.length > 0 && <p className="text-gray-500">End of commit history.</p>}
                     </div>
                 </div>
             );
         };
+
         const GitRepoView = () => { /* ... Identical to your original code ... */
             const { status } = useGit();
             const [isAddingRemote, setIsAddingRemote] = useState(false);
