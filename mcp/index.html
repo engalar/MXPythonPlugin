@@ -19,8 +19,15 @@
         // This section contains the reusable, application-agnostic core.
         // You should not need to modify this section to add new features.
         // -------------------------------------------------------------------
-
-        const { React, ReactDOM, redi, rediReact } = globalThis.__tmp;
+ 
+        // 等价于
+        // import * as React from 'react';
+        // import ReactDOM from 'react-dom/client';
+        // import * as redi from '@wendellhu/redi';
+        // import * as rediReact from '@wendellhu/redi/react-bindings';
+        // import * as rxjs from 'rxjs';
+        // import * as reactSpring from '@react-spring/web';
+        const { React, ReactDOM, redi, rediReact, rxjs, reactSpring } = globalThis.__tmp;
         delete globalThis.__tmp;
 
         // keep unused import for redi and rediReact

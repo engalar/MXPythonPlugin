@@ -12,7 +12,14 @@
     <script src="assets/vendor-bundle.umd.js"></script>
     <script src="assets/babel.min.js"></script>
     <script type="text/babel">
-        const { React, ReactDOM, redi, rediReact } = globalThis.__tmp;
+        // 等价于
+        // import * as React from 'react';
+        // import ReactDOM from 'react-dom/client';
+        // import * as redi from '@wendellhu/redi';
+        // import * as rediReact from '@wendellhu/redi/react-bindings';
+        // import * as rxjs from 'rxjs';
+        // import * as reactSpring from '@react-spring/web';
+        const { React, ReactDOM, redi, rediReact, rxjs, reactSpring } = globalThis.__tmp;
         delete globalThis.__tmp;
 
         // keep unused import for redi and rediReact

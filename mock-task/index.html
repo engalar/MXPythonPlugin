@@ -20,7 +20,14 @@
         // You should not need to modify this section to add new features.
         // -------------------------------------------------------------------
 
-        const { React, ReactDOM, redi, rediReact, rxjs } = globalThis.__tmp;
+        // 等价于
+        // import * as React from 'react';
+        // import ReactDOM from 'react-dom/client';
+        // import * as redi from '@wendellhu/redi';
+        // import * as rediReact from '@wendellhu/redi/react-bindings';
+        // import * as rxjs from 'rxjs';
+        // import * as reactSpring from '@react-spring/web';
+        const { React, ReactDOM, redi, rediReact, rxjs, reactSpring } = globalThis.__tmp;
         delete globalThis.__tmp;
 
         // keep unused import for redi and rediReact
@@ -69,6 +76,8 @@
             useContext,
         } = React;
         const { BehaviorSubject } = rxjs;
+        const { useSpring, useTransition, animated } = reactSpring;
+
         // 1. FRAMEWORK: CORE COMMUNICATION SERVICES
 
         const IBackendEventService = createIdentifier("IBackendEventService");
@@ -320,11 +329,20 @@
         const AppShell = () => {
             const panelService = useDependency(IPanelService);
 
-            // Subscribe to the state stream. The component will automatically re-render when the state changes.
+            // Subscribe to the state stream.
             const { openPanels, activePanel } = useObservable(
                 panelService.state$,
                 panelService.getInitialState()
             );
+
+            // Setup transitions for the active panel
+            const panelTransitions = useTransition(activePanel, {
+                key: panel => panel?.id,
+                from: { opacity: 0, transform: 'translateY(10px)' },
+                enter: { opacity: 1, transform: 'translateY(0px)' },
+                leave: { opacity: 0, transform: 'translateY(-10px)', position: 'absolute', top: 0, left: 0, right: 0 },
+                config: { tension: 220, friction: 25 },
+            });
 
             return (
                 <div className="p-4 max-w-5xl mx-auto bg-gray-50 shadow-lg rounded-lg mt-8 flex flex-col h-[90vh]">
@@ -342,21 +360,28 @@
                             </button>
                         ))}
                     </div>
-                    <div className="flex-grow p-4 bg-white overflow-y-auto">
-                        {/* More elegant rendering: directly use the selected activePanel from the state stream */}
-                        {activePanel ? <activePanel.component /> : <div className="text-center text-gray-500">No panel selected.</div>}
+                    <div className="flex-grow p-4 bg-white relative overflow-hidden">
+                        {panelTransitions((style, panel) =>
+                            panel ? (
+                                <animated.div style={style} className="w-full h-full">
+                                    <panel.component />
+                                </animated.div>
+                            ) : (
+                                <div className="text-center text-gray-500">No panel selected.</div>
+                            )
+                        )}
                     </div>
                 </div>
             );
         };
 
-        const Alert = ({ message, type }) => {
+        const Alert = ({ message, type, style }) => {
             const baseClasses = "text-sm px-4 py-2 rounded-md";
             const typeClasses = {
                 success: "bg-green-100 text-green-800",
                 error: "bg-red-100 text-red-800",
             };
-            return <div className={`${baseClasses} ${typeClasses[type]}`}>{message}</div>;
+            return <animated.div style={style} className={`${baseClasses} ${typeClasses[type]}`}>{message}</animated.div>;
         };
 
 
@@ -378,9 +403,8 @@
                 const duration = parseInt(seconds, 10);
                 if (isNaN(duration) || duration <= 0) return;
 
-                // Publish an event to the frontend event bus
                 eventBus.publish("task:started", { duration });
-                panelService.openPanel('logger'); // Programmatically open the logger panel
+                panelService.openPanel('logger');
 
                 try {
                     const result = await execute("SIMULATE_TASK", { seconds: duration });
@@ -389,6 +413,18 @@
                     eventBus.publish("task:completed", { status: 'error', error: err.message });
                 }
             };
+
+            const alertItem = error
+                ? { key: 'error', type: 'error', message: error }
+                : data && !isLoading
+                    ? { key: 'success', type: 'success', message: data.message }
+                    : null;
+
+            const alertTransitions = useTransition(alertItem, {
+                from: { opacity: 0, transform: 'translateY(-10px)' },
+                enter: { opacity: 1, transform: 'translateY(0px)' },
+                leave: { opacity: 0, transform: 'translateY(-10px)', position: 'absolute', top: 0, left: 0, right: 0 },
+            });
 
             return (
                 <div>
@@ -404,14 +440,14 @@
                             {isLoading ? `Running (${seconds}s)...` : "Start Task & Open Logger"}
                         </button>
                     </div>
-                    <div className="mt-3 h-6">
-                        {error && <Alert message={error} type="error" />}
-                        {data && !isLoading && <Alert message={data.message} type="success" />}
+                    <div className="mt-3 h-8 relative">
+                        {alertTransitions((style, item) =>
+                            item ? <Alert style={style} message={item.message} type={item.type} /> : null
+                        )}
                     </div>
                 </div>
             );
         };
-
         // Panel 2: A logger that listens to events from other panels
         const LoggerPanel = () => {
             const eventBus = useDependency(IEventBus);
@@ -420,7 +456,8 @@
             useEffect(() => {
                 const addLog = (logEntry) => {
                     const timestamp = new Date().toLocaleTimeString();
-                    setLogs(prev => [...prev, { ...logEntry, timestamp }]);
+                    const uniqueKey = `${Date.now()}-${Math.random()}`; // For stable transition keys
+                    setLogs(prev => [...prev, { ...logEntry, timestamp, key: uniqueKey }]);
                 };
 
                 const subscriptions = [
@@ -437,19 +474,29 @@
                 return () => subscriptions.forEach(unsubscribe => unsubscribe());
             }, [eventBus]);
 
+            const logTransitions = useTransition(logs, {
+                from: { opacity: 0, transform: 'translateY(10px)' },
+                enter: { opacity: 1, transform: 'translateY(0px)' },
+                keys: item => item.key,
+            });
+
             return (
                 <div>
                     <h2 className="text-xl font-semibold text-gray-700 mb-4">Event Log</h2>
                     <div className="space-y-2 p-3 bg-gray-800 text-white font-mono text-xs rounded-md h-64 overflow-y-auto">
-                        {logs.map((log, index) => (
-                            <p key={index} className={log.type === 'error' ? 'text-red-400' : log.type === 'success' ? 'text-green-400' : 'text-gray-300'}>
+                        {logTransitions((style, log) => (
+                            <animated.p
+                                style={style}
+                                className={log.type === 'error' ? 'text-red-400' : log.type === 'success' ? 'text-green-400' : 'text-gray-300'}
+                            >
                                 [{log.timestamp}] {log.message}
-                            </p>
+                            </animated.p>
                         ))}
                     </div>
                 </div>
             );
         };
+
         // ===================================================================
         // ==============     IOC & APP INITIALIZATION     ===================
         // ===================================================================
