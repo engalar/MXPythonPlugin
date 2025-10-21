@@ -33,75 +33,140 @@ class MendixEnvironmentService:
     def get_project_path(self) -> str:
         return self.app.Root.DirectoryPath
 
-class ICommandHandler(ABC):
-    """Contract for all command handlers."""
+# ===================================================================
+# ===================    CORE ABSTRACTIONS     ======================
+# ===================================================================
+from abc import ABC, abstractmethod
+from typing import Any, Dict, Callable, Iterable, Optional, Protocol
+import uuid
+import threading
+import json
+import traceback
+
+class ProgressUpdate:
+    """Structured progress data."""
+    def __init__(self, percent: float, message: str, stage: Optional[str] = None, metadata: Optional[Dict] = None):
+        self.percent = percent
+        self.message = message
+        self.stage = stage
+        self.metadata = metadata
+
+    def to_dict(self):
+        return {k: v for k, v in self.__dict__.items() if v is not None}
+
+class IMessageHub(Protocol):
+    """Abstraction for sending messages to the frontend (DIP)."""
+    def send(self, message: Dict): ...
+    def broadcast(self, channel: str, data: Any): ...
+    def push_to_session(self, session_id: str, data: Any): ...
+
+class IJobContext(Protocol):
+    """Context object provided to a running job handler."""
+    job_id: str
+    def report_progress(self, progress: ProgressUpdate): ...
+
+# --- Handler Interfaces (OCP) ---
+class IHandler(ABC):
     @property
     @abstractmethod
-    def command_type(self) -> str:
-        """The command type string this handler responds to."""
-        pass
+    def command_type(self) -> str: ...
 
+class IRpcHandler(IHandler):
     @abstractmethod
-    def execute(self, payload: Dict) -> Any:
-        """Executes the business logic for the command."""
-        pass
+    def execute(self, payload: Dict) -> Any: ...
 
-class IAsyncCommandHandler(ICommandHandler):
-    """Extends ICommandHandler for tasks that should not block the main thread."""
+class IJobHandler(IHandler):
     @abstractmethod
-    def execute_async(self, payload: Dict, task_id: str):
-        """The logic to be executed in a background thread."""
-        pass
+    def run(self, payload: Dict, context: IJobContext): ...
+
+class ISessionHandler(IHandler):
+    @abstractmethod
+    def on_connect(self, session_id: str, payload: Optional[Dict]): ...
+    @abstractmethod
+    def on_disconnect(self, session_id: str): ...
 
 # 2. FRAMEWORK: CENTRAL DISPATCHER
+# ===================================================================
+# ===================     FRAMEWORK CORE     ========================
+# ===================================================================
+class MendixMessageHub:
+    """Low-level implementation of IMessageHub for Mendix."""
+    def __init__(self, post_message_func: Callable):
+        self._post_message = post_message_func
+
+    def send(self, message: Dict):
+        self._post_message("backend:response", json.dumps(message))
+
+    def broadcast(self, channel: str, data: Any):
+        self.send({"type": "EVENT_BROADCAST", "channel": channel, "data": data})
+
+    def push_to_session(self, session_id: str, data: Any):
+        self.send({"type": "EVENT_SESSION", "sessionId": session_id, "data": data})
 
 class AppController:
-    """Routes incoming frontend commands to the appropriate ICommandHandler."""
-    def __init__(self, handlers: Iterable[ICommandHandler], mendix_env: MendixEnvironmentService):
-        self._mendix_env = mendix_env
-        self._command_handlers = {h.command_type: h for h in handlers}
-        self._mendix_env.post_message(
-            "backend:info", f"Controller initialized with handlers for: {list(self._command_handlers.keys())}")
+    """Routes incoming messages to registered handlers. Obeys OCP."""
+    def __init__(self, rpc_handlers: Iterable[IRpcHandler], job_handlers: Iterable[IJobHandler],
+                 session_handlers: Iterable[ISessionHandler], message_hub: IMessageHub):
+        self._rpc = {h.command_type: h for h in rpc_handlers}
+        self._jobs = {h.command_type: h for h in job_handlers}
+        self._sessions = {h.command_type: h for h in session_handlers}
+        self._hub = message_hub
+        print(f"Controller initialized. RPCs: {list(self._rpc.keys())}, Jobs: {list(self._jobs.keys())}, Sessions: {list(self._sessions.keys())}")
 
-    def dispatch(self, request: Dict) -> Dict:
-        command_type = request.get("type")
-        payload = request.get("payload", {})
-        correlation_id = request.get("correlationId")
+    def dispatch(self, request: Dict):
+        msg_type = request.get("type")
         try:
-            handler = self._command_handlers.get(command_type)
-            if not handler:
-                raise ValueError(f"No handler found for command type: {command_type}")
-
-            # Generic logic to handle sync vs. async handlers
-            if isinstance(handler, IAsyncCommandHandler):
-                task_id = f"task-{uuid.uuid4()}"
-                thread = threading.Thread(
-                    target=handler.execute_async,
-                    args=(payload, task_id)
-                )
-                thread.daemon = True
-                thread.start()
-                # The immediate response includes the taskId for frontend tracking
-                result = handler.execute(payload)
-                result['taskId'] = task_id
-                return self._create_success_response(result, correlation_id)
-            else:
-                # Original synchronous execution path
-                result = handler.execute(payload)
-                return self._create_success_response(result, correlation_id)
-
+            if msg_type == "RPC": self._handle_rpc(request)
+            elif msg_type == "JOB_START": self._handle_job_start(request)
+            elif msg_type == "SESSION_CONNECT": self._handle_session_connect(request)
+            elif msg_type == "SESSION_DISCONNECT": self._handle_session_disconnect(request)
+            else: raise ValueError(f"Unknown message type: {msg_type}")
         except Exception as e:
-            error_message = f"Error executing command '{command_type}': {e}"
-            self._mendix_env.post_message(
-                "backend:info", f"{error_message}\n{traceback.format_exc()}")
-            return self._create_error_response(error_message, correlation_id)
+            req_id = request.get("reqId")
+            if req_id:
+                self._hub.send({"type": "RPC_ERROR", "reqId": req_id, "message": str(e)})
+            traceback.print_exc()
 
-    def _create_success_response(self, data: Any, correlation_id: str) -> Dict:
-        return {"status": "success", "data": data, "correlationId": correlation_id}
+    def _handle_rpc(self, request):
+        handler = self._rpc.get(request["method"])
+        if not handler: raise ValueError(f"No RPC handler for '{request['method']}'")
+        result = handler.execute(request.get("params"))
+        self._hub.send({"type": "RPC_SUCCESS", "reqId": request["reqId"], "data": result})
 
-    def _create_error_response(self, message: str, correlation_id: str) -> Dict:
-        return {"status": "error", "message": message, "correlationId": correlation_id}
+    def _handle_job_start(self, request):
+        handler = self._jobs.get(request["method"])
+        if not handler: raise ValueError(f"No Job handler for '{request['method']}'")
+        
+        job_id = f"job-{uuid.uuid4()}"
+        
+        class JobContext(IJobContext):
+            def __init__(self, job_id: str, hub: IMessageHub):
+                self.job_id = job_id
+                self._hub = hub
+            def report_progress(self, progress: ProgressUpdate):
+                self._hub.send({"type": "JOB_PROGRESS", "jobId": self.job_id, "progress": progress.to_dict()})
 
+        context = JobContext(job_id, self._hub)
+        
+        def job_runner():
+            try:
+                result = handler.run(request.get("params"), context)
+                self._hub.send({"type": "JOB_SUCCESS", "jobId": job_id, "data": result})
+            except Exception as e:
+                self._hub.send({"type": "JOB_ERROR", "jobId": job_id, "message": str(e)})
+                traceback.print_exc()
+
+        thread = threading.Thread(target=job_runner, daemon=True)
+        thread.start()
+        self._hub.send({"type": "JOB_STARTED", "reqId": request["reqId"], "jobId": job_id})
+
+    def _handle_session_connect(self, request):
+        handler = self._sessions.get(request["channel"])
+        if handler: handler.on_connect(request["sessionId"], request.get("payload"))
+
+    def _handle_session_disconnect(self, request):
+        handler = self._sessions.get(request["channel"])
+        if handler: handler.on_disconnect(request["sessionId"])
 
 # endregion
 
@@ -113,50 +178,69 @@ class AppController:
 # To add a new feature, create a new class implementing ICommandHandler
 # or IAsyncCommandHandler, and register it in the Container below.
 # -------------------------------------------------------------------
+
 import time
 
-class SimulateTaskCommandHandler(IAsyncCommandHandler):
-    """
-    Handles the 'SIMULATE_TASK' command asynchronously.
-    This is an example of business logic implementing a framework interface.
-    """
-    command_type = "SIMULATE_TASK"
+class GetSystemInfoRpc(IRpcHandler):
+    """Example of a simple RPC handler."""
+    command_type = "system:getInfo"
+    def execute(self, payload: Dict) -> Any:
+        return {"pythonVersion": "3.x", "status": "OK", "timestamp": time.time()}
 
-    def __init__(self, mendix_env: MendixEnvironmentService):
-        self._mendix_env = mendix_env
+class TriggerBroadcastRpc(IRpcHandler):
+    """Triggers a server-wide broadcast message to all clients."""
+    command_type = "system:triggerBroadcast"
+
+    def __init__(self, message_hub: IMessageHub):
+        self._hub = message_hub
 
     def execute(self, payload: Dict) -> Any:
-        """Main thread: returns immediately, confirming the task has started."""
-        return {"status": "accepted", "message": "Async task accepted and running."}
+        message_text = payload.get("message", "This is a default broadcast message!")
+        
+        # The hub abstracts away the details of sending messages.
+        # This message will go to all clients listening on this channel.
+        self._hub.broadcast("global:notifications", {
+            "text": message_text,
+            "timestamp": time.time()
+        })
+        
+        return {"status": "Broadcast sent successfully."}
 
-    def execute_async(self, payload: Dict, task_id: str):
-        """Background thread: performs the long-running work."""
-        seconds = 5
-        try:
-            seconds = payload.get("seconds", 5)
-            seconds_int = int(seconds)
-            if not (0 < seconds_int <= 60):
-                raise ValueError("Seconds must be an integer between 1 and 60.")
+class FileImportJob(IJobHandler):
+    """Example of a long-running job with detailed progress."""
+    command_type = "import:file"
+    def run(self, payload: Dict, context: IJobContext):
+        filename = payload.get("filename", "unknown.csv")
+        context.report_progress(ProgressUpdate(percent=0.0, message=f"Starting import for {filename}...", stage="Initializing"))
+        time.sleep(1)
 
-            time.sleep(seconds_int)
-            result_message = f"Simulated task completed after {seconds_int} seconds."
+        context.report_progress(ProgressUpdate(percent=25.0, message="Reading file into memory...", stage="Reading"))
+        time.sleep(2)
 
-            completion_event = {
-                "taskId": task_id,
-                "status": "success",
-                "data": {"message": result_message}
-            }
-            self._mendix_env.post_message("backend:response", json.dumps(completion_event))
+        context.report_progress(ProgressUpdate(percent=60.0, message="Processing 50,000 rows...", stage="Processing"))
+        time.sleep(3)
 
-        except Exception as e:
-            error_message = f"Error in async task {task_id}: {e}"
-            self._mendix_env.post_message("backend:info", f"{error_message}\n{traceback.format_exc()}")
-            error_event = {
-                "taskId": task_id,
-                "status": "error",
-                "message": error_message
-            }
-            self._mendix_env.post_message("backend:response", json.dumps(error_event))
+        context.report_progress(ProgressUpdate(percent=95.0, message="Finalizing and saving to database...", stage="Saving"))
+        time.sleep(1)
+        
+        return {"rowsImported": 50000, "status": "Completed"}
+
+class RealtimeLogSession(ISessionHandler):
+    """Example of a targeted session handler."""
+    command_type = "logs:realtime"
+    def __init__(self, message_hub: IMessageHub):
+        self._hub = message_hub
+        self._active_sessions = set()
+        
+    def on_connect(self, session_id: str, payload: Optional[Dict]):
+        print(f"[Logger] Session {session_id} connected.")
+        self._active_sessions.add(session_id)
+        self._hub.push_to_session(session_id, {"level": "info", "message": "Log stream connected successfully."})
+
+    def on_disconnect(self, session_id: str):
+        print(f"[Logger] Session {session_id} disconnected.")
+        self._active_sessions.discard(session_id)
+
 
 # endregion 
 
@@ -165,67 +249,58 @@ class SimulateTaskCommandHandler(IAsyncCommandHandler):
 # ==============     IOC & APP INITIALIZATION     ===================
 # ===================================================================
 
+from dependency_injector import containers, providers
+
 class Container(containers.DeclarativeContainer):
     """The application's Inversion of Control (IoC) container."""
     config = providers.Configuration()
 
-    # --- Framework Registrations ---
-    mendix_env = providers.Singleton(
-        MendixEnvironmentService,
-        app_context=config.app_context,
-        window_service=config.window_service,
-        post_message_func=config.post_message_func,
+    # --- Framework Services (DIP) ---
+    message_hub: providers.Provider[IMessageHub] = providers.Singleton(
+        MendixMessageHub,
+        post_message_func=config.post_message_func
     )
 
-    # --- Business Logic Registrations ---
-    # To add a new command, add its handler to this list.
-    command_handlers = providers.List(
-        providers.Singleton(SimulateTaskCommandHandler, mendix_env=mendix_env),
-        # e.g., providers.Singleton(AnotherCommandHandler, mendix_env=mendix_env),
+    # --- Business Logic Handlers (OCP) ---
+    rpc_handlers = providers.List(
+        providers.Singleton(GetSystemInfoRpc),
+        providers.Singleton(TriggerBroadcastRpc, message_hub=message_hub)
+    )
+    job_handlers = providers.List(
+        providers.Singleton(FileImportJob)
+    )
+    session_handlers = providers.List(
+        providers.Singleton(RealtimeLogSession, message_hub=message_hub)
     )
 
-    # --- Framework Controller (depends on handlers) ---
+    # --- Core Controller ---
     app_controller = providers.Singleton(
         AppController,
-        handlers=command_handlers,
-        mendix_env=mendix_env,
+        rpc_handlers=rpc_handlers,
+        job_handlers=job_handlers,
+        session_handlers=session_handlers,
+        message_hub=message_hub,
     )
 
-# --- Application Entrypoint and Wiring ---
 def onMessage(e: Any):
     """Entry point called by Mendix Studio Pro for messages from the UI."""
-    if e.Message != "frontend:message":
-        return
+    if e.Message != "frontend:message": return
     controller = container.app_controller()
-    request_object = None
     try:
         request_string = JsonSerializer.Serialize(e.Data)
         request_object = json.loads(request_string)
-        response = controller.dispatch(request_object)
-        PostMessage("backend:response", json.dumps(response))
+        controller.dispatch(request_object)
     except Exception as ex:
-        PostMessage("backend:info", f"Fatal error in onMessage: {ex}\n{traceback.format_exc()}")
-        correlation_id = request_object.get("correlationId", "unknown") if request_object else "unknown"
-        fatal_error_response = {
-            "status": "error",
-            "message": f"A fatal backend error occurred: {ex}",
-            "correlationId": correlation_id
-        }
-        PostMessage("backend:response", json.dumps(fatal_error_response))
+        traceback.print_exc()
 
 def initialize_app():
-    """Initializes the IoC container with the Mendix environment services."""
     container = Container()
-    container.config.from_dict({
-        "app_context": currentApp,
-        "window_service": dockingWindowService,
-        "post_message_func": PostMessage
-    })
+    container.config.from_dict({"post_message_func": PostMessage})
     return container
 
 # --- Application Start ---
 PostMessage("backend:clear", '')
 container = initialize_app()
-PostMessage("backend:info", "Backend Python script initialized successfully.")
+PostMessage("backend:info", "Backend Python script (Refactored) initialized successfully.")
 
 # endregion
