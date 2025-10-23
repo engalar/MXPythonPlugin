@@ -186,73 +186,116 @@ class AppController:
 # -------------------------------------------------------------------
 
 import time
-class DeliberateErrorRpc(IRpcHandler):
-    """An RPC handler that always raises an exception to test error handling."""
-    command_type = "system:deliberateError"
-    def execute(self, payload: Dict) -> Any:
-        # This will cause a traceback to be generated and sent to the frontend.
-        x = 1
-        y = 0
-        return x / y # Raises ZeroDivisionError
-class GetSystemInfoRpc(IRpcHandler):
-    """Example of a simple RPC handler."""
-    command_type = "system:getInfo"
-    def execute(self, payload: Dict) -> Any:
-        return {"pythonVersion": "3.x", "status": "OK", "timestamp": time.time()}
+import System
+import System.Reflection
 
-class TriggerBroadcastRpc(IRpcHandler):
-    """Triggers a server-wide broadcast message to all clients."""
-    command_type = "system:triggerBroadcast"
+# Helper function to safely get a FullName to avoid exceptions with complex generic types
+def safe_get_name(type_obj):
+    try:
+        return type_obj.FullName if type_obj else "N/A"
+    except:
+        return "Unknown Generic Type"
 
-    def __init__(self, message_hub: IMessageHub):
-        self._hub = message_hub
+# Helper to format method/constructor parameters
+def format_params(parameters):
+    return [
+        {"name": p.Name, "type": safe_get_name(p.ParameterType)}
+        for p in parameters
+    ]
 
-    def execute(self, payload: Dict) -> Any:
-        message_text = payload.get("message", "This is a default broadcast message!")
-        
-        # The hub abstracts away the details of sending messages.
-        # This message will go to all clients listening on this channel.
-        self._hub.broadcast("global:notifications", {
-            "text": message_text,
-            "timestamp": time.time()
-        })
-        
-        return {"status": "Broadcast sent successfully."}
+from System.Reflection import BindingFlags
+class AssemblyReflectionJob(IJobHandler):
+    """
+    Reflects the Mendix.StudioPro.ExtensionsAPI assembly to extract metadata
+    about all its types.
+    """
+    command_type = "reflection:getApiMetadata"
 
-class FileImportJob(IJobHandler):
-    """Example of a long-running job with detailed progress."""
-    command_type = "import:file"
     def run(self, payload: Dict, context: IJobContext):
-        filename = payload.get("filename", "unknown.csv")
-        context.report_progress(ProgressUpdate(percent=0.0, message=f"Starting import for {filename}...", stage="Initializing"))
-        time.sleep(1)
-
-        context.report_progress(ProgressUpdate(percent=25.0, message="Reading file into memory...", stage="Reading"))
-        time.sleep(2)
-
-        context.report_progress(ProgressUpdate(percent=60.0, message="Processing 50,000 rows...", stage="Processing"))
-        time.sleep(3)
-
-        context.report_progress(ProgressUpdate(percent=95.0, message="Finalizing and saving to database...", stage="Saving"))
-        time.sleep(1)
+        context.report_progress(ProgressUpdate(0, "Starting API reflection...", "Initializing"))
         
-        return {"rowsImported": 50000, "status": "Completed"}
+        from Mendix.StudioPro.ExtensionsAPI.BackgroundJobs import BackgroundJob
+        job = BackgroundJob('test')
+        jobType = job.GetType()
+        assembly = jobType.Assembly
+        if not assembly:
+            raise RuntimeError("Could not find assembly: Mendix.StudioPro.ExtensionsAPI")
+            
+        # Use try-catch for GetTypes as it can fail on some assemblies
+        try:
+            all_types = list(assembly.GetTypes())
+        except System.Reflection.ReflectionTypeLoadException as e:
+            print("ReflectionTypeLoadException:", e.LoaderExceptions)
+            raise e
 
-class RealtimeLogSession(ISessionHandler):
-    """Example of a targeted session handler."""
-    command_type = "logs:realtime"
-    def __init__(self, message_hub: IMessageHub):
-        self._hub = message_hub
-        self._active_sessions = set()
+        total_types = len(all_types)
         
-    def on_connect(self, session_id: str, payload: Optional[Dict]):
-        print(f"[Logger] Session {session_id} connected.")
-        self._active_sessions.add(session_id)
-        self._hub.push_to_session(session_id, {"level": "info", "message": "Log stream connected successfully."})
+        results = {"assemblyName": assembly.FullName, "types": []}
+        
+        binding_flags = BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.DeclaredOnly
 
-    def on_disconnect(self, session_id: str):
-        print(f"[Logger] Session {session_id} disconnected.")
-        self._active_sessions.discard(session_id)
+        for i, type_info in enumerate(all_types):
+            progress = (i + 1) / total_types * 100
+            if i % 10 == 0: # Report progress periodically
+                context.report_progress(ProgressUpdate(progress, f"Analyzing {type_info.Name}", "Scanning"))
+
+            if not type_info.IsPublic:
+                continue # Skip non-public types for a cleaner view
+
+            type_kind = "Class"
+            if type_info.IsInterface: type_kind = "Interface"
+            elif type_info.IsEnum: type_kind = "Enum"
+            elif type_info.IsValueType and not type_info.IsEnum: type_kind = "Struct"
+            
+            type_data = {
+                "fullName": type_info.FullName,
+                "name": type_info.Name,
+                "namespace": type_info.Namespace,
+                "isPublic": type_info.IsPublic,
+                "isAbstract": type_info.IsAbstract,
+                "isSealed": type_info.IsSealed,
+                "typeKind": type_kind,
+                "baseType": safe_get_name(type_info.BaseType),
+                "interfaces": [safe_get_name(i) for i in type_info.GetInterfaces()],
+                "properties": [
+                    {
+                        "name": p.Name,
+                        "type": safe_get_name(p.PropertyType),
+                        "canRead": p.CanRead,
+                        "canWrite": p.CanWrite,
+                    } for p in type_info.GetProperties(binding_flags)
+                ],
+                "methods": [
+                    {
+                        "name": m.Name,
+                        "returnType": safe_get_name(m.ReturnType),
+                        "isStatic": m.IsStatic,
+                        "parameters": format_params(m.GetParameters()),
+                    } for m in type_info.GetMethods(binding_flags) if not m.IsSpecialName # Filter out property get/set methods
+                ],
+                "events": [
+                    {
+                        "name": e.Name,
+                        "type": safe_get_name(e.EventHandlerType)
+                    } for e in type_info.GetEvents(binding_flags)
+                ],
+                "fields": [
+                    {
+                        "name": f.Name,
+                        "type": safe_get_name(f.FieldType),
+                        "isStatic": f.IsStatic,
+                    } for f in type_info.GetFields(binding_flags)
+                ],
+                "enumValues": list(System.Enum.GetNames(type_info)) if type_info.IsEnum else None,
+            }
+            results["types"].append(type_data)
+        
+        context.report_progress(ProgressUpdate(100, "Reflection complete.", "Finalizing"))
+        # Sort types by name for a consistent UI
+        results["types"].sort(key=lambda t: t["name"])
+        return results
+
+
 
 
 # endregion 
@@ -276,15 +319,11 @@ class Container(containers.DeclarativeContainer):
 
     # --- Business Logic Handlers (OCP) ---
     rpc_handlers = providers.List(
-        providers.Singleton(GetSystemInfoRpc),
-        providers.Singleton(TriggerBroadcastRpc, message_hub=message_hub),
-        providers.Singleton(DeliberateErrorRpc),
     )
     job_handlers = providers.List(
-        providers.Singleton(FileImportJob)
+        providers.Singleton(AssemblyReflectionJob)
     )
     session_handlers = providers.List(
-        providers.Singleton(RealtimeLogSession, message_hub=message_hub)
     )
 
     # --- Core Controller ---
