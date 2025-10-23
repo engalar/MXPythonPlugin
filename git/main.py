@@ -437,15 +437,41 @@ class GitDiffJob(IJobHandler):
         context.report_progress(ProgressUpdate(
             percent=65.0, message="Analyzing differences between models...", stage="Analyzing"))
 
-        diff_result = containers2.perform_pymx_diff(
-            repo_path=repo_path, old_commit=old_commit, new_commit=new_commit)
-        time.sleep(0.5)
+        c = configurationService.Configuration  # TODO: GET FROM IOC CONFIG
+        modelerVersion = f'{c.MendixVersion}.{c.BuildTag}'
+        base_dir = os.environ.get('ProgramFiles')
+        mx_path = os.path.join(
+                    base_dir,
+                    'Mendix',
+                    modelerVersion,
+                    'modeler',
+                    'mx.exe'
+                )
 
-        context.report_progress(ProgressUpdate(
-            percent=95.0, message="Formatting comparison results...", stage="Finalizing"))
-        time.sleep(0.2)
+        if os.path.exists(mx_path):
+            container = containers2.Container()
+            container.config.from_dict({
+                "git": {
+                    "repo_path": repo_path
+                },
+                "mendix": {
+                    "mx_exe_path": os.fspath(mx_path)
+                }
+            })
+            orchestrator = container.diff_orchestrator()
+            diff_result = orchestrator.compare_commits(
+                old_commit=old_commit,
+                new_commit=new_commit
+            )
+            time.sleep(0.5)
 
-        return diff_result
+            context.report_progress(ProgressUpdate(
+                percent=95.0, message="Formatting comparison results...", stage="Finalizing"))
+            time.sleep(0.2)
+
+            return diff_result
+        else:
+            raise RuntimeError(f'{mx_path} not exist!')
 
 
 class GitInitJob(IJobHandler):
