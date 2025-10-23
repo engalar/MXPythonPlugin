@@ -69,6 +69,7 @@
             useState,
             useEffect,
             useRef,
+            useMemo,
             useReducer,
             Fragment,
             useCallback,
@@ -461,7 +462,154 @@
         // To add a new feature, add your new Component here and register
         // it as an `IView` in the IOC Configuration section below.
         // -------------------------------------------------------------------
+        const Icon = ({ name, className = "w-4 h-4" }) => {
+            const icons = {
+                namespace: <path strokeLinecap="round" strokeLinejoin="round" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />,
+                class: <path strokeLinecap="round" strokeLinejoin="round" d="M8 14v3m4-3v3m4-3v3M3 21h18M3 10h18M3 7l9-4 9 4M4 10h16v11H4V10z" />,
+                interface: <path strokeLinecap="round" strokeLinejoin="round" d="M11 4a2 2 0 114 0v1a1 1 0 001 1h3a1 1 0 011 1v3a1 1 0 01-1 1h-1a2 2 0 100 4h1a1 1 0 011 1v3a1 1 0 01-1 1h-3a1 1 0 01-1-1v-1a2 2 0 10-4 0v1a1 1 0 01-1 1H7a1 1 0 01-1-1v-3a1 1 0 00-1-1H4a2 2 0 110-4h1a1 1 0 001-1V7a1 1 0 011-1h3a1 1 0 001-1V4z" />,
+                struct: <path strokeLinecap="round" strokeLinejoin="round" d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4" />,
+                enum: <path strokeLinecap="round" strokeLinejoin="round" d="M4 6h16M4 10h16M4 14h16M4 18h16" />,
+                chevron: <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M9 5l7 7-7 7" />
+            };
+            return (
+                <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    {icons[name] || icons.class}
+                </svg>
+            );
+        }; const ResizablePanel = ({ left, right, initialWidth = 33.33 }) => {
+            const [width, setWidth] = useState(initialWidth);
+            const isResizing = useRef(false);
+            const containerRef = useRef(null);
 
+            const handleMouseDown = (e) => {
+                isResizing.current = true;
+                e.preventDefault();
+            };
+
+            const handleMouseUp = () => {
+                isResizing.current = false;
+            };
+
+            const handleMouseMove = useCallback((e) => {
+                if (!isResizing.current || !containerRef.current) return;
+                const containerRect = containerRef.current.getBoundingClientRect();
+                const newWidth = ((e.clientX - containerRect.left) / containerRect.width) * 100;
+                // Clamp the width between 15% and 75%
+                setWidth(Math.max(15, Math.min(75, newWidth)));
+            }, []);
+
+            useEffect(() => {
+                window.addEventListener('mousemove', handleMouseMove);
+                window.addEventListener('mouseup', handleMouseUp);
+                return () => {
+                    window.removeEventListener('mousemove', handleMouseMove);
+                    window.removeEventListener('mouseup', handleMouseUp);
+                };
+            }, [handleMouseMove]);
+
+            return (
+                <div ref={containerRef} className="flex h-full w-full">
+                    <aside style={{ width: `${width}%` }} className="h-full flex-shrink-0">
+                        {left}
+                    </aside>
+                    <div
+                        onMouseDown={handleMouseDown}
+                        className="w-1.5 flex-shrink-0 bg-gray-200 hover:bg-blue-400 cursor-col-resize"
+                    />
+                    <main style={{ width: `${100 - width}%` }} className="h-full flex-shrink-0">
+                        {right}
+                    </main>
+                </div>
+            );
+        }; const TreeView = ({ data, onSelect, initialExpanded = false }) => {
+            const [expandedNodes, setExpandedNodes] = useState(() => new Set());
+
+            const allNodeIds = useMemo(() => {
+                const ids = new Set();
+                const traverse = (nodes, parentPath) => {
+                    nodes.forEach(node => {
+                        const currentPath = `${parentPath}/${node.id}`;
+                        if (node.children) {
+                            ids.add(currentPath);
+                            traverse(node.children, currentPath);
+                        }
+                    });
+                };
+                traverse(data, 'root');
+                return ids;
+            }, [data]);
+
+            useEffect(() => {
+                if (initialExpanded) setExpandedNodes(allNodeIds);
+            }, [initialExpanded, allNodeIds]);
+
+            const toggleNode = (nodePath) => {
+                setExpandedNodes(prev => {
+                    const next = new Set(prev);
+                    if (next.has(nodePath)) {
+                        next.delete(nodePath);
+                    } else {
+                        next.add(nodePath);
+                    }
+                    return next;
+                });
+            };
+
+            const expandAll = () => setExpandedNodes(allNodeIds);
+            const collapseAll = () => setExpandedNodes(new Set());
+
+            return (
+                <div className="p-1 text-sm">
+                    <div className="flex space-x-2 p-1 mb-1 border-b">
+                        <button onClick={expandAll} className="text-xs px-2 py-0.5 bg-gray-200 hover:bg-gray-300 rounded">Expand All</button>
+                        <button onClick={collapseAll} className="text-xs px-2 py-0.5 bg-gray-200 hover:bg-gray-300 rounded">Collapse All</button>
+                    </div>
+                    {data.map(node => (
+                        <TreeNode key={node.id} node={node} onSelect={onSelect} expandedNodes={expandedNodes} toggleNode={toggleNode} path={`root/${node.id}`} />
+                    ))}
+                </div>
+            );
+        };
+
+        const TreeNode = ({ node, onSelect, expandedNodes, toggleNode, path }) => {
+            const { useMemo } = React;
+            const isExpanded = useMemo(() => expandedNodes.has(path), [expandedNodes, path]);
+            const isParent = node.children && node.children.length > 0;
+            const isSelectable = !!node.data;
+
+            const handleToggle = () => {
+                if (isParent) toggleNode(path);
+            };
+
+            const handleSelect = () => {
+                if (isSelectable) onSelect(node.data);
+            };
+
+            return (
+                <div className="pl-4">
+                    <div
+                        onClick={isSelectable ? handleSelect : handleToggle}
+                        className={`flex items-center space-x-1 py-0.5 rounded cursor-pointer ${isSelectable ? 'hover:bg-blue-100' : ''} ${node.isSelected ? 'bg-blue-200 font-semibold' : ''}`}
+                    >
+                        {isParent && (
+                            <button onClick={e => { e.stopPropagation(); handleToggle(); }} className="p-0.5 rounded-full hover:bg-gray-200">
+                                <Icon name="chevron" className={`w-2 h-2 transform transition-transform ${isExpanded ? 'rotate-90' : ''}`} />
+                            </button>
+                        )}
+                        {!isParent && <div className="w-3" />}
+                        <Icon name={node.icon} className="w-3.5 h-3.5 flex-shrink-0 text-gray-600" />
+                        <span className="truncate">{node.label}</span>
+                    </div>
+                    {isExpanded && isParent && (
+                        <div>
+                            {node.children.map(child => (
+                                <TreeNode key={child.id} node={child} onSelect={onSelect} expandedNodes={expandedNodes} toggleNode={toggleNode} path={`${path}/${child.id}`} />
+                            ))}
+                        </div>
+                    )}
+                </div>
+            );
+        };
         const Badge = ({ children, color = 'gray' }) => {
             const colors = {
                 gray: 'bg-gray-200 text-gray-700',
@@ -473,16 +621,27 @@
             return <span className={`px-2 py-0.5 text-xs font-semibold rounded-full ${colors[color]}`}>{children}</span>;
         };
 
-        const CollapsibleSection = ({ title, count, children, defaultOpen = false }) => {
+
+
+        const CollapsibleSectionContext = createContext(null);
+
+        const CollapsibleSection = ({ title, count, children, defaultOpen = false, id }) => {
             const [isOpen, setIsOpen] = useState(defaultOpen);
+            const context = useContext(CollapsibleSectionContext);
+
+            useEffect(() => {
+                if (context?.command === 'expand') setIsOpen(true);
+                if (context?.command === 'collapse') setIsOpen(false);
+            }, [context?.command]);
+
             if (count === 0) return null;
             return (
-                <div className="border-t mt-4 pt-2">
-                    <button onClick={() => setIsOpen(!isOpen)} className="w-full text-left flex justify-between items-center py-1 font-semibold text-gray-700 hover:text-gray-900 focus:outline-none">
+                <div className="border-t mt-2 pt-1">
+                    <button onClick={() => setIsOpen(!isOpen)} className="w-full text-left flex justify-between items-center py-1 font-semibold text-gray-700 hover:text-gray-900 focus:outline-none text-sm">
                         <span>{title} ({count})</span>
-                        <svg className={`w-3 h-3 transform transition-transform ${isOpen ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5l7 7-7 7"></path></svg>
+                        <Icon name="chevron" className={`w-2.5 h-2.5 transform transition-transform ${isOpen ? 'rotate-90' : ''}`} />
                     </button>
-                    {isOpen && <div className="pl-4 mt-2">{children}</div>}
+                    {isOpen && <div className="pl-2 mt-1">{children}</div>}
                 </div>
             );
         }
@@ -490,86 +649,165 @@
         const TypeDetail = ({ type }) => {
             if (!type) return <div className="flex items-center justify-center h-full text-gray-500">Select a type from the list to see its details.</div>;
 
+            const [command, setCommand] = useState(null);
+
             const typeColors = { Class: 'blue', Interface: 'purple', Struct: 'green', Enum: 'yellow' };
 
+            useEffect(() => {
+                // Reset command after render to allow re-triggering
+                if (command) setCommand(null);
+            }, [command]);
+
             return (
-                <div className="p-4 h-full overflow-y-auto">
-                    <h3 className="text-2xl font-bold text-gray-800">{type.name}</h3>
-                    <div className="text-sm text-gray-500 mb-2 break-all">{type.namespace}</div>
+                <CollapsibleSectionContext.Provider value={{ command }}>
+                    <div className="p-2 h-full overflow-y-auto text-sm">
+                        {/* Header */}
+                        <div className="sticky top-0 bg-white/80 backdrop-blur-sm z-10 pb-2 -mt-2 pt-2">
+                            <div className="flex justify-between items-start">
+                                <div>
+                                    <h3 className="text-xl font-bold text-gray-800">{type.name}</h3>
+                                    <div className="text-xs text-gray-500 mb-1 break-all">{type.namespace}</div>
+                                </div>
+                                <div className="flex space-x-2 flex-shrink-0 mt-1">
+                                    <button onClick={() => setCommand('expand')} className="text-xs px-2 py-0.5 bg-gray-200 hover:bg-gray-300 rounded">Expand All</button>
+                                    <button onClick={() => setCommand('collapse')} className="text-xs px-2 py-0.5 bg-gray-200 hover:bg-gray-300 rounded">Collapse All</button>
+                                </div>
+                            </div>
+                            <div className="flex items-center space-x-2 mb-2">
+                                <Badge color={typeColors[type.typeKind]}>{type.typeKind}</Badge>
+                                {type.isPublic && <Badge>public</Badge>}
+                                {type.isAbstract && <Badge>abstract</Badge>}
+                                {type.isSealed && <Badge>sealed</Badge>}
+                            </div>
+                            {type.baseType && type.baseType !== 'System.Object' && type.baseType !== 'System.ValueType' && type.baseType !== 'System.Enum' && (
+                                <div className="text-xs mb-0.5"><strong>Inherits:</strong> <span className="font-mono bg-gray-100 px-1 py-0.5 rounded">{type.baseType}</span></div>
+                            )}
+                            {type.interfaces.length > 0 && (
+                                <div className="text-xs"><strong>Implements:</strong> <span className="font-mono bg-gray-100 px-1 py-0.5 rounded">{type.interfaces.join(', ')}</span></div>
+                            )}
+                        </div>
 
-                    <div className="flex items-center space-x-2 mb-4">
-                        <Badge color={typeColors[type.typeKind]}>{type.typeKind}</Badge>
-                        {type.isPublic && <Badge>public</Badge>}
-                        {type.isAbstract && <Badge>abstract</Badge>}
-                        {type.isSealed && <Badge>sealed</Badge>}
-                    </div>
-
-                    {type.baseType && type.baseType !== 'System.Object' && type.baseType !== 'System.ValueType' && type.baseType !== 'System.Enum' && (
-                        <div className="text-sm mb-1"><strong>Inherits:</strong> <span className="font-mono bg-gray-100 p-1 rounded">{type.baseType}</span></div>
-                    )}
-                    {type.interfaces.length > 0 && (
-                        <div className="text-sm"><strong>Implements:</strong> <span className="font-mono bg-gray-100 p-1 rounded">{type.interfaces.join(', ')}</span></div>
-                    )}
-
-                    {type.enumValues && (
-                        <CollapsibleSection title="Enum Values" count={type.enumValues.length} defaultOpen={true}>
-                            <ul className="list-disc list-inside font-mono text-sm space-y-1">
-                                {type.enumValues.map(v => <li key={v}>{v}</li>)}
-                            </ul>
+                        {type.enumValues && (
+                            <CollapsibleSection title="Enum Values" count={type.enumValues?.length} defaultOpen={true}>
+                                <ul className="list-disc list-inside font-mono text-xs space-y-0.5">
+                                    {type.enumValues.map(v => <li key={v}>{v}</li>)}
+                                </ul>
+                            </CollapsibleSection>
+                        )}
+                        <CollapsibleSection title="Properties" count={type.properties.length}>
+                            {type.properties.map(p => (
+                                <div key={p.name} className="font-mono text-xs py-0.5">
+                                    <span className="text-purple-600">{p.type}</span> <span className="font-bold text-gray-800">{p.name}</span> {'{'}
+                                    {p.canRead && <span className="text-green-600"> get; </span>}
+                                    {p.canWrite && <span className="text-blue-600"> set; </span>}
+                                    {'}'}
+                                </div>
+                            ))}
                         </CollapsibleSection>
-                    )}
 
-                    <CollapsibleSection title="Properties" count={type.properties.length}>
-                        {type.properties.map(p => (
-                            <div key={p.name} className="font-mono text-sm py-1">
-                                <span className="text-purple-600">{p.type}</span> <span className="font-bold text-gray-800">{p.name}</span> {'{'}
-                                {p.canRead && <span className="text-green-600"> get; </span>}
-                                {p.canWrite && <span className="text-blue-600"> set; </span>}
-                                {'}'}
-                            </div>
-                        ))}
-                    </CollapsibleSection>
+                        <CollapsibleSection title="Constructors" count={type.constructors.length}>
+                            {type.constructors.map((c, i) => (
+                                <div key={`${type.name}-ctor-${i}`} className="font-mono text-xs py-0.5">
+                                    <span className="font-bold text-gray-800">{type.name}</span>
+                                    (
+                                    {c.parameters.length > 0
+                                        ? c.parameters.map(p => <span key={p.name}><span className="text-purple-500">{p.type}</span> {p.name}</span>).reduce((prev, curr) => [prev, ', ', curr])
+                                        : null
+                                    }
+                                    )
+                                </div>
+                            ))}
+                        </CollapsibleSection>
 
-                    <CollapsibleSection title="Methods" count={type.methods.length}>
-                        {type.methods.map(m => (
-                            <div key={`${m.name}-${m.parameters.map(p => p.type).join('-')}`} className="font-mono text-sm py-1">
-                                {m.isStatic && <span className="text-gray-500">static </span>}
-                                <span className="text-purple-600">{m.returnType}</span> <span className="font-bold text-gray-800">{m.name}</span>
-                                ({m.parameters.map(p => <span key={p.name}><span className="text-purple-500">{p.type}</span> {p.name}</span>).reduce((prev, curr) => [prev, ', ', curr])})
-                            </div>
-                        ))}
-                    </CollapsibleSection>
+                        <CollapsibleSection title="Methods" count={type.methods.length}>
+                            {type.methods.map(m => (
+                                <div key={`${m.name}-${m.parameters.map(p => p.type).join('-')}`} className="font-mono text-xs py-0.5">
+                                    {m.isStatic && <span className="text-gray-500">static </span>}
+                                    <span className="text-purple-600">{m.returnType}</span> <span className="font-bold text-gray-800">{m.name}</span>
+                                    (
+                                    {m.parameters.length > 0
+                                        ? m.parameters.map(p => <span key={p.name}><span className="text-purple-500">{p.type}</span> {p.name}</span>).reduce((prev, curr) => [prev, ', ', curr])
+                                        : null
+                                    }
+                                    )
+                                </div>
+                            ))}
+                        </CollapsibleSection>
 
-                    <CollapsibleSection title="Events" count={type.events.length}>
-                        {type.events.map(e => (
-                            <div key={e.name} className="font-mono text-sm py-1">
-                                <span className="font-bold text-orange-600">event</span> <span className="text-purple-600">{e.type}</span> <span className="font-bold text-gray-800">{e.name}</span>
-                            </div>
-                        ))}
-                    </CollapsibleSection>
+                        <CollapsibleSection title="Events" count={type.events.length}>
+                            {type.events.map(e => (
+                                <div key={e.name} className="font-mono text-xs py-0.5">
+                                    <span className="font-bold text-orange-600">event</span> <span className="text-purple-600">{e.type}</span> <span className="font-bold text-gray-800">{e.name}</span>
+                                </div>
+                            ))}
+                        </CollapsibleSection>
 
-                    <CollapsibleSection title="Fields" count={type.fields.length}>
-                        {type.fields.map(f => (
-                            <div key={f.name} className="font-mono text-sm py-1">
-                                {f.isStatic && <span className="text-gray-500">static </span>}
-                                <span className="text-purple-600">{f.type}</span> <span className="font-bold text-gray-800">{f.name}</span>
-                            </div>
-                        ))}
-                    </CollapsibleSection>
-                </div>
+                        <CollapsibleSection title="Fields" count={type.fields.length}>
+                            {type.fields.map(f => (
+                                <div key={f.name} className="font-mono text-xs py-0.5">
+                                    {f.isStatic && <span className="text-gray-500">static </span>}
+                                    <span className="text-purple-600">{f.type}</span> <span className="font-bold text-gray-800">{f.name}</span>
+                                </div>
+                            ))}
+                        </CollapsibleSection>
+                    </div>
+                </CollapsibleSectionContext.Provider>
             );
         }
-
         const ApiExplorerPanel = () => {
             const { status, progress, data, error, start } = useJob('reflection:getApiMetadata');
             const [selectedType, setSelectedType] = useState(null);
             const [searchTerm, setSearchTerm] = useState("");
+            const [isTreeInitiallyExpanded, setIsTreeInitiallyExpanded] = useState(false);
+            const { useMemo } = React;
 
             useEffect(() => {
-                if (status === 'idle') {
-                    start();
-                }
+                if (status === 'idle') start();
             }, [status, start]);
+
+            const iconMap = { Class: 'class', Interface: 'interface', Struct: 'struct', Enum: 'enum' };
+
+            const treeData = useMemo(() => {
+                if (!data || !data.namespaces) return [];
+
+                const namespaces = searchTerm ? data.namespaces : data.namespaces;
+                const lowerCaseSearch = searchTerm.toLowerCase();
+
+                const namespaceNodes = Object.entries(namespaces).map(([ns, kinds]) => {
+                    const kindNodes = Object.entries(kinds).map(([kind, types]) => {
+                        const typeNodes = types
+                            .filter(t => !searchTerm || t.name.toLowerCase().includes(lowerCaseSearch))
+                            .map(t => ({
+                                id: t.name,
+                                label: t.name,
+                                icon: iconMap[t.typeKind] || 'class',
+                                data: t,
+                                isSelected: selectedType?.fullName === t.fullName
+                            }));
+
+                        if (typeNodes.length === 0) return null;
+
+                        return {
+                            id: kind,
+                            label: `${kind}s (${typeNodes.length})`,
+                            icon: iconMap[kind] || 'class',
+                            children: typeNodes
+                        };
+                    }).filter(Boolean);
+
+                    if (kindNodes.length === 0) return null;
+
+                    return {
+                        id: ns,
+                        label: ns,
+                        icon: 'namespace',
+                        children: kindNodes
+                    };
+                }).filter(Boolean);
+
+                return namespaceNodes;
+            }, [data, searchTerm, selectedType]);
+
 
             if (status === 'starting' || status === 'running') {
                 return (
@@ -580,39 +818,46 @@
                         </div>
                         <p className="mt-2 text-gray-600">{progress.message}</p>
                     </div>
-                )
+                );
             }
 
             if (error) return <ErrorDisplay error={error} />;
             if (!data) return <div className="text-center p-8">No reflection data available.</div>;
 
-            const filteredTypes = data.types.filter(t => t.name.toLowerCase().includes(searchTerm.toLowerCase()));
-
             return (
-                <div className="flex h-full border rounded-lg overflow-hidden bg-white">
-                    <aside className="w-1/3 border-r bg-gray-50 flex flex-col">
-                        <div className="p-2 border-b">
-                            <input type="text" placeholder={`Search ${data.types.length} types...`} value={searchTerm} onChange={e => setSearchTerm(e.target.value)} className="w-full px-2 py-1 border rounded" />
-                        </div>
-                        <ul className="overflow-y-auto flex-grow">
-                            {filteredTypes.map(type => (
-                                <li key={type.fullName}>
-                                    <button onClick={() => setSelectedType(type)} className={`w-full text-left p-2 text-sm hover:bg-blue-100 focus:outline-none ${selectedType?.fullName === type.fullName ? 'bg-blue-200 font-semibold' : ''}`}>
-                                        {type.name}
-                                        <span className="block text-xs text-gray-500 truncate">{type.namespace}</span>
-                                    </button>
-                                </li>
-                            ))}
-                        </ul>
-                    </aside>
-                    <main className="w-2/3">
-                        <TypeDetail type={selectedType} />
-                    </main>
+                <div className="h-full border rounded-lg overflow-hidden bg-white">
+                    <ResizablePanel
+                        left={
+                            <div className="h-full flex flex-col bg-gray-50">
+                                <div className="p-1 border-b flex items-center space-x-2">
+                                    <input
+                                        type="text"
+                                        placeholder={`Search ${Object.values(data.namespaces).flatMap(k => Object.values(k)).flat().length} types...`}
+                                        value={searchTerm}
+                                        onChange={e => setSearchTerm(e.target.value)}
+                                        className="w-full px-2 py-1 border rounded text-sm"
+                                    />
+                                    <label className="flex items-center space-x-1.5 text-xs text-gray-600 whitespace-nowrap">
+                                        <input type="checkbox" checked={isTreeInitiallyExpanded} onChange={e => setIsTreeInitiallyExpanded(e.target.checked)} />
+                                        <span>Auto-Expand</span>
+                                    </label>
+                                </div>
+                                <div className="overflow-y-auto flex-grow">
+                                    <TreeView
+                                        data={treeData}
+                                        onSelect={setSelectedType}
+                                        initialExpanded={isTreeInitiallyExpanded || !!searchTerm}
+                                    />
+                                </div>
+                            </div>
+                        }
+                        right={
+                            <TypeDetail type={selectedType} />
+                        }
+                    />
                 </div>
             );
         };
-
-
         // ===================================================================
         // ==============     IOC & APP INITIALIZATION     ===================
         // ===================================================================
@@ -632,17 +877,17 @@
 
 
             return (
-                <div className="p-4 max-w-5xl mx-auto bg-gray-50 shadow-lg rounded-lg mt-8 flex flex-col h-[90vh]">
-                    <h1 className="text-3xl font-bold text-gray-800 mb-4 text-center">Mendix Control Panel (Refactored)</h1>
+                <div className="p-2 max-w-7xl mx-auto bg-gray-50 shadow-lg rounded-lg mt-4 flex flex-col h-[95vh]">
+                    <h1 className="text-2xl font-bold text-gray-800 mb-2 text-center">Mendix Control Panel (Refactored)</h1>
                     <div className="flex border-b border-gray-300">
                         {openPanels.map(panel => (
                             <button key={panel.id} onClick={() => panelService.setActivePanel(panel.id)}
-                                className={`px-4 py-2 text-sm font-medium border-b-2 ${panel.id === activePanel?.id ? 'border-blue-600 text-blue-700' : 'border-transparent text-gray-500 hover:text-gray-700'}`}>
+                                className={`px-3 py-1.5 text-sm font-medium border-b-2 ${panel.id === activePanel?.id ? 'border-blue-600 text-blue-700' : 'border-transparent text-gray-500 hover:text-gray-700'}`}>
                                 {panel.title}
                             </button>
                         ))}
                     </div>
-                    <div className="flex-grow p-4 bg-white relative overflow-hidden">
+                    <div className="flex-grow p-2 bg-white relative overflow-hidden">
                         {panelTransitions((style, panel) =>
                             panel ? (
                                 <animated.div style={style} className="w-full h-full">

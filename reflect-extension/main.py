@@ -204,10 +204,11 @@ def format_params(parameters):
     ]
 
 from System.Reflection import BindingFlags
+from collections import defaultdict
 class AssemblyReflectionJob(IJobHandler):
     """
     Reflects the Mendix.StudioPro.ExtensionsAPI assembly to extract metadata
-    about all its types.
+    about all its types, grouped by namespace and type kind.
     """
     command_type = "reflection:getApiMetadata"
 
@@ -221,7 +222,6 @@ class AssemblyReflectionJob(IJobHandler):
         if not assembly:
             raise RuntimeError("Could not find assembly: Mendix.StudioPro.ExtensionsAPI")
             
-        # Use try-catch for GetTypes as it can fail on some assemblies
         try:
             all_types = list(assembly.GetTypes())
         except System.Reflection.ReflectionTypeLoadException as e:
@@ -229,70 +229,53 @@ class AssemblyReflectionJob(IJobHandler):
             raise e
 
         total_types = len(all_types)
-        
-        results = {"assemblyName": assembly.FullName, "types": []}
-        
+        flat_type_list = []
         binding_flags = BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.DeclaredOnly
 
         for i, type_info in enumerate(all_types):
             progress = (i + 1) / total_types * 100
-            if i % 10 == 0: # Report progress periodically
+            if i % 20 == 0:
                 context.report_progress(ProgressUpdate(progress, f"Analyzing {type_info.Name}", "Scanning"))
 
             if not type_info.IsPublic:
-                continue # Skip non-public types for a cleaner view
+                continue
 
             type_kind = "Class"
             if type_info.IsInterface: type_kind = "Interface"
             elif type_info.IsEnum: type_kind = "Enum"
             elif type_info.IsValueType and not type_info.IsEnum: type_kind = "Struct"
             
+            # Create a dictionary for the current type
             type_data = {
-                "fullName": type_info.FullName,
-                "name": type_info.Name,
-                "namespace": type_info.Namespace,
-                "isPublic": type_info.IsPublic,
-                "isAbstract": type_info.IsAbstract,
-                "isSealed": type_info.IsSealed,
-                "typeKind": type_kind,
-                "baseType": safe_get_name(type_info.BaseType),
+                "fullName": type_info.FullName, "name": type_info.Name, "namespace": type_info.Namespace,
+                "isPublic": type_info.IsPublic, "isAbstract": type_info.IsAbstract, "isSealed": type_info.IsSealed,
+                "typeKind": type_kind, "baseType": safe_get_name(type_info.BaseType),
                 "interfaces": [safe_get_name(i) for i in type_info.GetInterfaces()],
-                "properties": [
-                    {
-                        "name": p.Name,
-                        "type": safe_get_name(p.PropertyType),
-                        "canRead": p.CanRead,
-                        "canWrite": p.CanWrite,
-                    } for p in type_info.GetProperties(binding_flags)
-                ],
-                "methods": [
-                    {
-                        "name": m.Name,
-                        "returnType": safe_get_name(m.ReturnType),
-                        "isStatic": m.IsStatic,
-                        "parameters": format_params(m.GetParameters()),
-                    } for m in type_info.GetMethods(binding_flags) if not m.IsSpecialName # Filter out property get/set methods
-                ],
-                "events": [
-                    {
-                        "name": e.Name,
-                        "type": safe_get_name(e.EventHandlerType)
-                    } for e in type_info.GetEvents(binding_flags)
-                ],
-                "fields": [
-                    {
-                        "name": f.Name,
-                        "type": safe_get_name(f.FieldType),
-                        "isStatic": f.IsStatic,
-                    } for f in type_info.GetFields(binding_flags)
-                ],
+                "properties": [{"name": p.Name, "type": safe_get_name(p.PropertyType), "canRead": p.CanRead, "canWrite": p.CanWrite} for p in type_info.GetProperties(binding_flags)],
+                "constructors": [{"parameters": format_params(c.GetParameters())} for c in type_info.GetConstructors(binding_flags)],
+                "methods": [{"name": m.Name, "returnType": safe_get_name(m.ReturnType), "isStatic": m.IsStatic, "parameters": format_params(m.GetParameters())} for m in type_info.GetMethods(binding_flags) if not m.IsSpecialName],
+                "events": [{"name": e.Name, "type": safe_get_name(e.EventHandlerType)} for e in type_info.GetEvents(binding_flags)],
+                "fields": [{"name": f.Name, "type": safe_get_name(f.FieldType), "isStatic": f.IsStatic} for f in type_info.GetFields(binding_flags)],
                 "enumValues": list(System.Enum.GetNames(type_info)) if type_info.IsEnum else None,
             }
-            results["types"].append(type_data)
-        
-        context.report_progress(ProgressUpdate(100, "Reflection complete.", "Finalizing"))
-        # Sort types by name for a consistent UI
-        results["types"].sort(key=lambda t: t["name"])
+            flat_type_list.append(type_data)
+
+        context.report_progress(ProgressUpdate(100, "Grouping and sorting results...", "Finalizing"))
+
+        # Group the flat list into the desired nested structure
+        grouped_namespaces = defaultdict(lambda: defaultdict(list))
+        for type_data in flat_type_list:
+            ns = type_data["namespace"] or "Global"
+            kind = type_data["typeKind"]
+            grouped_namespaces[ns][kind].append(type_data)
+
+        # Sort the final structure: namespaces alphabetically, kinds alphabetically, types alphabetically
+        results = {"assemblyName": assembly.FullName, "namespaces": {}}
+        for ns in sorted(grouped_namespaces.keys()):
+            results["namespaces"][ns] = {}
+            for kind in sorted(grouped_namespaces[ns].keys()):
+                results["namespaces"][ns][kind] = sorted(grouped_namespaces[ns][kind], key=lambda t: t["name"])
+
         return results
 
 
