@@ -501,7 +501,31 @@ class GitInitJob(IJobHandler):
             percent=10.0, message="Starting repository initialization...", stage="Begin"))
         # --- END MODIFICATION ---
 
-        run_git_command(repo_path, ["init"])
+        run_git_command(repo_path, ["init", "--initial-branch=main"])
+        # core.bare = false
+        run_git_command(repo_path, ["config", "core.bare", "false"])
+
+        # core.repositoryformatversion = 0
+        run_git_command(
+            repo_path, ["config", "core.repositoryformatversion", "0"])
+
+        # core.filemode = false
+        run_git_command(repo_path, ["config", "core.filemode", "false"])
+
+        # core.symlinks = false
+        run_git_command(repo_path, ["config", "core.symlinks", "false"])
+
+        # core.ignorecase = true
+        run_git_command(repo_path, ["config", "core.ignorecase", "true"])
+
+        # core.logallrefupdates = true
+        run_git_command(repo_path, ["config", "core.logallrefupdates", "true"])
+
+        # core.autocrlf = False
+        run_git_command(repo_path, ["config", "core.autocrlf", "false"])
+
+        # core.longpaths = true
+        run_git_command(repo_path, ["config", "core.longpaths", "true"])
         context.report_progress(ProgressUpdate(
             percent=25.0, message="Git repository created.", stage="Init"))
         time.sleep(0.5)
@@ -519,7 +543,7 @@ class GitInitJob(IJobHandler):
         commit_sha = run_git_command(repo_path, ["rev-parse", "HEAD"])
 
         # Add Mendix metadata note
-        c = configurationService.Configuration # TODO: GET FROM IOC CONFIG
+        c = configurationService.Configuration  # TODO: GET FROM IOC CONFIG
         modelerVersion = f'{c.MendixVersion}.{c.BuildTag}'
         metadata_dict = {
             "BranchName": "",
@@ -610,7 +634,7 @@ class GitPushJob(IJobHandler):
             percent=50.0, message=f"Pushing branch '{branch_name}'...", stage="Uploading"))
 
         result = execute_silent(
-            ["git", "push", remote_name, branch_name], repo_path, timeout=120, check=False)
+            ["git", "push", "-u", remote_name, branch_name], repo_path, timeout=120, check=False)
 
         if result.returncode != 0:
             error_message = result.stderr.strip() if result.stderr else result.stdout.strip()
