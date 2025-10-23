@@ -1,0 +1,7 @@
+{
+  "name": "api-md",
+  "author": null,
+  "email": null,
+  "ui": "index.html",
+  "plugin": "main.py"
+}
