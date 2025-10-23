@@ -1,4 +1,16 @@
 # region FRAMEWORK CODE
+from pymx.git import containers as containers2
+import importlib
+import re
+import sys
+import subprocess
+import os
+import time
+from typing import Any, Dict, Callable, Iterable, Optional, Protocol
+from System.Text.Json import JsonSerializer
+from dependency_injector import containers, providers
+import uuid
+import threading
 import json
 import traceback
 from typing import Any, Dict, Callable, Iterable
@@ -8,10 +20,6 @@ from abc import ABC, abstractmethod
 import clr
 clr.AddReference("System.Text.Json")
 clr.AddReference("Mendix.StudioPro.ExtensionsAPI")
-import threading
-import uuid
-from dependency_injector import containers, providers
-from System.Text.Json import JsonSerializer
 # ShowDevTools()
 
 # ===================================================================
@@ -36,79 +44,174 @@ class MendixEnvironmentService:
         return self.app.Root.DirectoryPath
 
 
-class ICommandHandler(ABC):
-    """Contract for all command handlers."""
+# ===================================================================
+# ===================    CORE ABSTRACTIONS     ======================
+# ===================================================================
+
+
+class ProgressUpdate:
+    """Structured progress data."""
+
+    def __init__(self, percent: float, message: str, stage: Optional[str] = None, metadata: Optional[Dict] = None):
+        self.percent = percent
+        self.message = message
+        self.stage = stage
+        self.metadata = metadata
+
+    def to_dict(self):
+        return {k: v for k, v in self.__dict__.items() if v is not None}
+
+
+class IMessageHub(Protocol):
+    """Abstraction for sending messages to the frontend (DIP)."""
+
+    def send(self, message: Dict): ...
+    def broadcast(self, channel: str, data: Any): ...
+    def push_to_session(self, session_id: str, data: Any): ...
+
+
+class IJobContext(Protocol):
+    """Context object provided to a running job handler."""
+    job_id: str
+    def report_progress(self, progress: ProgressUpdate): ...
+
+# --- Handler Interfaces (OCP) ---
+
+
+class IHandler(ABC):
     @property
     @abstractmethod
-    def command_type(self) -> str:
-        """The command type string this handler responds to."""
-        pass
+    def command_type(self) -> str: ...
 
+
+class IRpcHandler(IHandler):
     @abstractmethod
-    def execute(self, payload: Dict) -> Any:
-        """Executes the business logic for the command."""
-        pass
+    def execute(self, payload: Dict) -> Any: ...
 
 
-class IAsyncCommandHandler(ICommandHandler):
-    """Extends ICommandHandler for tasks that should not block the main thread."""
+class IJobHandler(IHandler):
     @abstractmethod
-    def execute_async(self, payload: Dict, task_id: str):
-        """The logic to be executed in a background thread."""
-        pass
+    def run(self, payload: Dict, context: IJobContext): ...
+
+
+class ISessionHandler(IHandler):
+    @abstractmethod
+    def on_connect(self, session_id: str, payload: Optional[Dict]): ...
+    @abstractmethod
+    def on_disconnect(self, session_id: str): ...
 
 # 2. FRAMEWORK: CENTRAL DISPATCHER
+# ===================================================================
+# ===================     FRAMEWORK CORE     ========================
+# ===================================================================
+
+
+class MendixMessageHub:
+    """Low-level implementation of IMessageHub for Mendix."""
+
+    def __init__(self, post_message_func: Callable):
+        self._post_message = post_message_func
+
+    def send(self, message: Dict):
+        self._post_message("backend:response", json.dumps(message))
+
+    def broadcast(self, channel: str, data: Any):
+        self.send({"type": "EVENT_BROADCAST",
+                  "channel": channel, "data": data})
+
+    def push_to_session(self, session_id: str, data: Any):
+        self.send({"type": "EVENT_SESSION",
+                  "sessionId": session_id, "data": data})
 
 
 class AppController:
-    """Routes incoming frontend commands to the appropriate ICommandHandler."""
+    """Routes incoming messages to registered handlers. Obeys OCP."""
 
-    def __init__(self, handlers: Iterable[ICommandHandler], mendix_env: MendixEnvironmentService):
-        self._mendix_env = mendix_env
-        self._command_handlers = {h.command_type: h for h in handlers}
-        self._mendix_env.post_message(
-            "backend:info", f"Controller initialized with handlers for: {list(self._command_handlers.keys())}")
+    def __init__(self, rpc_handlers: Iterable[IRpcHandler], job_handlers: Iterable[IJobHandler],
+                 session_handlers: Iterable[ISessionHandler], message_hub: IMessageHub):
+        self._rpc = {h.command_type: h for h in rpc_handlers}
+        self._jobs = {h.command_type: h for h in job_handlers}
+        self._sessions = {h.command_type: h for h in session_handlers}
+        self._hub = message_hub
+        print(
+            f"Controller initialized. RPCs: {list(self._rpc.keys())}, Jobs: {list(self._jobs.keys())}, Sessions: {list(self._sessions.keys())}")
 
-    def dispatch(self, request: Dict) -> Dict:
-        command_type = request.get("type")
-        payload = request.get("payload", {})
-        correlation_id = request.get("correlationId")
+    def dispatch(self, request: Dict):
+        msg_type = request.get("type")
         try:
-            handler = self._command_handlers.get(command_type)
-            if not handler:
-                raise ValueError(
-                    f"No handler found for command type: {command_type}")
-
-            # Generic logic to handle sync vs. async handlers
-            if isinstance(handler, IAsyncCommandHandler):
-                task_id = f"task-{uuid.uuid4()}"
-                thread = threading.Thread(
-                    target=handler.execute_async,
-                    args=(payload, task_id)
-                )
-                thread.daemon = True
-                thread.start()
-                # The immediate response includes the taskId for frontend tracking
-                result = handler.execute(payload)
-                result['taskId'] = task_id
-                return self._create_success_response(result, correlation_id)
+            if msg_type == "RPC":
+                self._handle_rpc(request)
+            elif msg_type == "JOB_START":
+                self._handle_job_start(request)
+            elif msg_type == "SESSION_CONNECT":
+                self._handle_session_connect(request)
+            elif msg_type == "SESSION_DISCONNECT":
+                self._handle_session_disconnect(request)
             else:
-                # Original synchronous execution path
-                result = handler.execute(payload)
-                return self._create_success_response(result, correlation_id)
-
+                raise ValueError(f"Unknown message type: {msg_type}")
         except Exception as e:
-            error_message = f"Error executing command '{command_type}': {e}"
-            self._mendix_env.post_message(
-                "backend:info", f"{error_message}\n{traceback.format_exc()}")
-            return self._create_error_response(error_message, correlation_id)
+            req_id = request.get("reqId")
+            if req_id:
+                # MODIFIED: Capture and send the full traceback string
+                tb_string = traceback.format_exc()
+                self._hub.send({"type": "RPC_ERROR", "reqId": req_id,
+                               "message": str(e), "traceback": tb_string})
+            traceback.print_exc()
 
-    def _create_success_response(self, data: Any, correlation_id: str) -> Dict:
-        return {"status": "success", "data": data, "correlationId": correlation_id}
+    def _handle_rpc(self, request):
+        handler = self._rpc.get(request["method"])
+        if not handler:
+            raise ValueError(f"No RPC handler for '{request['method']}'")
+        result = handler.execute(request.get("params"))
+        self._hub.send(
+            {"type": "RPC_SUCCESS", "reqId": request["reqId"], "data": result})
 
-    def _create_error_response(self, message: str, correlation_id: str) -> Dict:
-        return {"status": "error", "message": message, "correlationId": correlation_id}
+    def _handle_job_start(self, request):
+        handler = self._jobs.get(request["method"])
+        if not handler:
+            raise ValueError(f"No Job handler for '{request['method']}'")
 
+        job_id = f"job-{uuid.uuid4()}"
+
+        class JobContext(IJobContext):
+            def __init__(self, job_id: str, hub: IMessageHub):
+                self.job_id = job_id
+                self._hub = hub
+
+            def report_progress(self, progress: ProgressUpdate):
+                self._hub.send(
+                    {"type": "JOB_PROGRESS", "jobId": self.job_id, "progress": progress.to_dict()})
+
+        context = JobContext(job_id, self._hub)
+
+        def job_runner():
+            try:
+                # To test job error, uncomment the next line
+                # raise ValueError("This is a deliberate job error")
+                result = handler.run(request.get("params"), context)
+                self._hub.send(
+                    {"type": "JOB_SUCCESS", "jobId": job_id, "data": result})
+            except Exception as e:
+                # MODIFIED: Capture and send the full traceback string for jobs
+                tb_string = traceback.format_exc()
+                self._hub.send({"type": "JOB_ERROR", "jobId": job_id,
+                               "message": str(e), "traceback": tb_string})
+                traceback.print_exc()
+
+        thread = threading.Thread(target=job_runner, daemon=True)
+        thread.start()
+        self._hub.send(
+            {"type": "JOB_STARTED", "reqId": request["reqId"], "jobId": job_id})
+
+    def _handle_session_connect(self, request):
+        handler = self._sessions.get(request["channel"])
+        if handler:
+            handler.on_connect(request["sessionId"], request.get("payload"))
+
+    def _handle_session_disconnect(self, request):
+        handler = self._sessions.get(request["channel"])
+        if handler:
+            handler.on_disconnect(request["sessionId"])
 
 # endregion
 
@@ -120,14 +223,15 @@ class AppController:
 # To add a new feature, create a new class implementing ICommandHandler
 # or IAsyncCommandHandler, and register it in the Container below.
 # -------------------------------------------------------------------
-import os
-import subprocess
-import sys
-import re
+
+
+# Add these imports to the BUSINESS LOGIC CODE region
 # Alias to avoid name clash with our own container
-from pymx.git import containers as containers2
-import importlib
 importlib.reload(containers2)
+
+# Add these helper functions (or ensure they are present) from the old main.py
+# into the BUSINESS LOGIC CODE region.
+
 
 def execute_silent(command, cwd=None, timeout=None, check=True):
     """Executes a command silently, capturing stdout and stderr."""
@@ -268,30 +372,29 @@ def get_git_status_info(repo_path: str) -> dict:
     except Exception as e:
         return {"isRepo": True, "error": str(e)}
 
-
-def initialize_and_commit(repo_path: str, message: str) -> dict:
-    """Initializes a git repository, adds all files, and commits."""
-    run_git_command(repo_path, ["init"])
-    run_git_command(repo_path, ["add", "."])
-    run_git_command(repo_path, ["commit", "-m", message])
-    commit_sha = run_git_command(repo_path, ["rev-parse", "HEAD"])
-    mx_metadata_note = '{"BranchName":"","ModelerVersion":"10.24.4.77222","ModelChanges":[],"RelatedStories":[],"SolutionVersion":"","MPRFormatVersion":"Version2","HasModelerVersion":true}'
-    run_git_command(repo_path, [
-                    "notes", "--ref=mx_metadata", "add", "-m", mx_metadata_note, commit_sha])
-    return {"status": "success", "commitSha": commit_sha}
+# Add these new handler classes to the BUSINESS LOGIC CODE region.
 
 
-# 4. BUSINESS LOGIC: COMMAND HANDLER IMPLEMENTATIONS
+class GetGitStatusRpc(IRpcHandler):
+    """RPC handler for getting the overall status of the git repository."""
+    command_type = "git:getStatus"
 
-class GitLogCommandHandler(ICommandHandler):
-    """Handles fetching a paginated list of the git commit history."""
-    command_type = "GET_GIT_LOG"
+    def __init__(self, mendix_env: MendixEnvironmentService):
+        self._mendix_env = mendix_env
+
+    def execute(self, payload: Dict) -> Any:
+        return get_git_status_info(self._mendix_env.get_project_path())
+
+
+class GetGitLogRpc(IRpcHandler):
+    """RPC handler for fetching a paginated list of the git commit history."""
+    command_type = "git:getLog"
     DEFAULT_PAGE_SIZE = 20
 
     def __init__(self, mendix_env: MendixEnvironmentService):
         self._mendix_env = mendix_env
 
-    def execute(self, payload: Dict) -> dict:
+    def execute(self, payload: Dict) -> Any:
         page = payload.get("page", 1)
         page_size = payload.get("pageSize", self.DEFAULT_PAGE_SIZE)
         skip_count = (page - 1) * page_size
@@ -301,64 +404,138 @@ class GitLogCommandHandler(ICommandHandler):
         return {"commits": commits, "hasMore": has_more}
 
 
-class GetGitStatusCommandHandler(ICommandHandler):
-    """Handles getting the overall status of the git repository."""
-    command_type = "GET_GIT_STATUS"
+class GitDiffJob(IJobHandler):
+    """
+    Handles comparing two git commits as a long-running job with progress updates.
+    """
+    command_type = "diff:run"
 
-    def __init__(
-        self, mendix_env: MendixEnvironmentService): self._mendix_env = mendix_env
+    def __init__(self, mendix_env: MendixEnvironmentService):
+        self._mendix_env = mendix_env
 
-    def execute(self, payload: Dict) -> Dict:
-        return get_git_status_info(self._mendix_env.get_project_path())
+    def run(self, payload: Dict, context: IJobContext):
+        old_commit = payload.get("oldCommit")
+        new_commit = payload.get("newCommit")
+        if not old_commit or not new_commit:
+            raise ValueError(
+                "Payload must contain both 'oldCommit' and 'newCommit'.")
+
+        repo_path = self._mendix_env.get_project_path()
+
+        context.report_progress(ProgressUpdate(
+            percent=0.0, message=f"Starting comparison...", stage="Initializing"))
+        time.sleep(0.5)
+
+        context.report_progress(ProgressUpdate(
+            percent=15.0, message=f"Loading model data for base commit {old_commit[:7]}...", stage="Loading Base"))
+        time.sleep(1)
+
+        context.report_progress(ProgressUpdate(
+            percent=40.0, message=f"Loading model data for target commit {new_commit[:7]}...", stage="Loading Target"))
+        time.sleep(1)
+
+        context.report_progress(ProgressUpdate(
+            percent=65.0, message="Analyzing differences between models...", stage="Analyzing"))
+
+        diff_result = containers2.perform_pymx_diff(
+            repo_path=repo_path, old_commit=old_commit, new_commit=new_commit)
+        time.sleep(0.5)
+
+        context.report_progress(ProgressUpdate(
+            percent=95.0, message="Formatting comparison results...", stage="Finalizing"))
+        time.sleep(0.2)
+
+        return diff_result
 
 
-class GitInitCommitCommandHandler(IAsyncCommandHandler):
-    """Handles initializing a repo and making the first commit."""
-    command_type = "GIT_INIT_COMMIT"
+class GitInitJob(IJobHandler):
+    """Initializes a repo and makes the first commit as a job."""
+    command_type = "git:init"
 
-    def __init__(
-        self, mendix_env: MendixEnvironmentService): self._mendix_env = mendix_env
+    def __init__(self, mendix_env: MendixEnvironmentService):
+        self._mendix_env = mendix_env
+
+    def run(self, payload: Dict, context: IJobContext):
+        message = payload.get("message", "Initial commit")
+        repo_path = self._mendix_env.get_project_path()
+
+        # --- START MODIFICATION: Add .gitignore creation ---
+        context.report_progress(ProgressUpdate(
+            percent=0.0, message="Checking for .gitignore file...", stage="Setup"))
+
+        gitignore_path = os.path.join(repo_path, ".gitignore")
+        gitignore_content = """/**/node_modules/
+!/javascriptsource/**/node_modules/
+/*.launch
+/.classpath
+/.mendix-cache/
+/.project
+/deployment/
+/javasource/*/proxies/
+/javasource/system/
+/modeler-merge-marker
+/nativemobile/builds
+/packages/
+/project-settings.user.json
+/releases/
+*.mpr.lock
+*.mpr.bak
+/vendorlib/temp/
+.DS_Store
+/app.mpr.bak
+/app.mpr.lock
+/nativemobile/builds/
+/.svn/
+"""
+        if not os.path.exists(gitignore_path):
+            context.report_progress(ProgressUpdate(
+                percent=5.0, message="Creating Mendix-specific .gitignore file...", stage="Setup"))
+            with open(gitignore_path, 'w', encoding='utf-8') as f:
+                f.write(gitignore_content)
+            time.sleep(0.2)
+        else:
+            context.report_progress(ProgressUpdate(
+                percent=5.0, message=".gitignore already exists, skipping.", stage="Setup"))
+
+        context.report_progress(ProgressUpdate(
+            percent=10.0, message="Starting repository initialization...", stage="Begin"))
+        # --- END MODIFICATION ---
+
+        run_git_command(repo_path, ["init"])
+        context.report_progress(ProgressUpdate(
+            percent=25.0, message="Git repository created.", stage="Init"))
+        time.sleep(0.5)
+
+        context.report_progress(ProgressUpdate(
+            percent=40.0, message="Adding all project files to the index...", stage="Add"))
+        run_git_command(repo_path, ["add", "."])
+        context.report_progress(ProgressUpdate(
+            percent=75.0, message="Files added.", stage="Add"))
+        time.sleep(1)  # Simulate work
+
+        context.report_progress(ProgressUpdate(
+            percent=80.0, message=f"Committing with message: '{message}'...", stage="Commit"))
+        run_git_command(repo_path, ["commit", "-m", message])
+        commit_sha = run_git_command(repo_path, ["rev-parse", "HEAD"])
+
+        # Add Mendix metadata note
+        mx_metadata_note = '{"BranchName":"","ModelerVersion":"10.24.4.77222","ModelChanges":[],"RelatedStories":[],"SolutionVersion":"","MPRFormatVersion":"Version2","HasModelerVersion":true}'
+        run_git_command(repo_path, [
+                        "notes", "--ref=mx_metadata", "add", "-m", mx_metadata_note, commit_sha])
+        context.report_progress(ProgressUpdate(
+            percent=95.0, message="Mendix metadata attached.", stage="Commit"))
+
+        return {"status": "success", "commitSha": commit_sha}
+
+
+class GitSwitchBranchRpc(IRpcHandler):
+    """Handles switching the current git branch."""
+    command_type = "git:switchBranch"
+
+    def __init__(self, mendix_env: MendixEnvironmentService):
+        self._mendix_env = mendix_env
 
     def execute(self, payload: Dict) -> Any:
-        """Main thread: returns immediately, confirming the task has started."""
-        return {"status": "accepted", "message": "Async task accepted and running."}
-
-    def execute_async(self, payload: Dict, task_id: str):
-        """Background thread: performs the long-running work."""
-        try:
-            message = payload.get("message")
-            data = initialize_and_commit(
-                self._mendix_env.get_project_path(), message)
-
-            completion_event = {
-                "taskId": task_id,
-                "status": "success",
-                "data": data
-            }
-            self._mendix_env.post_message(
-                "backend:response", json.dumps(completion_event))
-
-        except Exception as e:
-            error_message = f"Error in async task {task_id}: {e}"
-            self._mendix_env.post_message(
-                "backend:info", f"{error_message}\n{traceback.format_exc()}")
-            error_event = {
-                "taskId": task_id,
-                "status": "error",
-                "message": error_message
-            }
-            self._mendix_env.post_message(
-                "backend:response", json.dumps(error_event))
-
-
-class GitSwitchBranchCommandHandler(ICommandHandler):
-    """Handles switching the current git branch."""
-    command_type = "GIT_SWITCH_BRANCH"
-
-    def __init__(
-        self, mendix_env: MendixEnvironmentService): self._mendix_env = mendix_env
-
-    def execute(self, payload: Dict) -> Dict:
         branch_name = payload.get("branchName")
         if not branch_name:
             raise ValueError("Payload must contain 'branchName'.")
@@ -367,14 +544,14 @@ class GitSwitchBranchCommandHandler(ICommandHandler):
         return {"status": "success", "switchedTo": branch_name}
 
 
-class GitAddRemoteCommandHandler(ICommandHandler):
+class GitAddRemoteRpc(IRpcHandler):
     """Handles adding a new git remote."""
-    command_type = "GIT_ADD_REMOTE"
+    command_type = "git:addRemote"
 
-    def __init__(
-        self, mendix_env: MendixEnvironmentService): self._mendix_env = mendix_env
+    def __init__(self, mendix_env: MendixEnvironmentService):
+        self._mendix_env = mendix_env
 
-    def execute(self, payload: Dict) -> Dict:
+    def execute(self, payload: Dict) -> Any:
         name, url = payload.get("name"), payload.get("url")
         if not name or not url:
             raise ValueError("Payload must contain 'name' and 'url'.")
@@ -383,14 +560,14 @@ class GitAddRemoteCommandHandler(ICommandHandler):
         return {"status": "success", "name": name, "url": url}
 
 
-class GitDeleteRemoteCommandHandler(ICommandHandler):
+class GitDeleteRemoteRpc(IRpcHandler):
     """Handles deleting a git remote."""
-    command_type = "GIT_DELETE_REMOTE"
+    command_type = "git:deleteRemote"
 
-    def __init__(
-        self, mendix_env: MendixEnvironmentService): self._mendix_env = mendix_env
+    def __init__(self, mendix_env: MendixEnvironmentService):
+        self._mendix_env = mendix_env
 
-    def execute(self, payload: Dict) -> Dict:
+    def execute(self, payload: Dict) -> Any:
         remote_name = payload.get("remoteName")
         if not remote_name:
             raise ValueError("Payload must contain 'remoteName'.")
@@ -399,37 +576,48 @@ class GitDeleteRemoteCommandHandler(ICommandHandler):
         return {"status": "success", "removed": remote_name}
 
 
-class GitPushCommandHandler(ICommandHandler):
-    """Handles pushing to a specified remote."""
-    command_type = "GIT_PUSH"
+class GitPushJob(IJobHandler):
+    """Handles pushing to a specified remote as a job."""
+    command_type = "git:push"
 
-    def __init__(
-        self, mendix_env: MendixEnvironmentService): self._mendix_env = mendix_env
+    def __init__(self, mendix_env: MendixEnvironmentService):
+        self._mendix_env = mendix_env
 
-    def execute(self, payload: Dict) -> Dict:
+    def run(self, payload: Dict, context: IJobContext):
         remote_name, branch_name = payload.get(
             "remoteName"), payload.get("branchName")
         if not remote_name or not branch_name:
             raise ValueError(
                 "Payload must contain 'remoteName' and 'branchName'.")
+
         repo_path = self._mendix_env.get_project_path()
-        # Use execute_silent with check=False to handle git's non-zero exit codes on some "successful" pushes with warnings
+        context.report_progress(ProgressUpdate(
+            percent=10.0, message=f"Starting push to '{remote_name}'...", stage="Connecting"))
+
+        time.sleep(1)  # simulate connection
+        context.report_progress(ProgressUpdate(
+            percent=50.0, message=f"Pushing branch '{branch_name}'...", stage="Uploading"))
+
         result = execute_silent(
             ["git", "push", remote_name, branch_name], repo_path, timeout=120, check=False)
+
         if result.returncode != 0:
             error_message = result.stderr.strip() if result.stderr else result.stdout.strip()
             raise Exception(f"Push failed: {error_message}")
+
+        context.report_progress(ProgressUpdate(
+            percent=95.0, message="Push completed successfully.", stage="Finalizing"))
         return {"status": "success", "output": result.stdout.strip() or result.stderr.strip()}
 
 
-class GitSetRemoteUrlCommandHandler(ICommandHandler):
+class GitSetRemoteUrlRpc(IRpcHandler):
     """Handles setting the URL for a git remote."""
-    command_type = "GIT_SET_REMOTE_URL"
+    command_type = "git:setRemoteUrl"
 
-    def __init__(
-        self, mendix_env: MendixEnvironmentService): self._mendix_env = mendix_env
+    def __init__(self, mendix_env: MendixEnvironmentService):
+        self._mendix_env = mendix_env
 
-    def execute(self, payload: Dict) -> Dict:
+    def execute(self, payload: Dict) -> Any:
         remote_name, url = payload.get("remoteName"), payload.get("url")
         if not remote_name or not url:
             raise ValueError("Payload must contain 'remoteName' and 'url'.")
@@ -437,43 +625,6 @@ class GitSetRemoteUrlCommandHandler(ICommandHandler):
                         "remote", "set-url", remote_name, url])
         return {"status": "success", "remote": remote_name, "newUrl": url}
 
-
-# Add this new command handler class within the "BUSINESS LOGIC: COMMAND HANDLER IMPLEMENTATIONS" section
-
-
-class GitDiffCommandHandler(IAsyncCommandHandler):
-    """Handles comparing two git commits using the pymx library."""
-    command_type = "GIT_DIFF_COMMITS"
-
-    def __init__(self, mendix_env: MendixEnvironmentService):
-        self._mendix_env = mendix_env
-
-    def execute(self, payload: Dict) -> Any:
-        """Main thread: validates input and confirms the async task has started."""
-        if not payload.get("oldCommit") or not payload.get("newCommit"):
-            raise ValueError(
-                "Payload must contain both 'oldCommit' and 'newCommit'.")
-        return {"status": "accepted", "message": "Async diff task accepted and running."}
-
-    def execute_async(self, payload: Dict, task_id: str):
-        """Background thread: performs the potentially long-running diff operation."""
-        try:
-            repo_path = self._mendix_env.get_project_path()
-            data = containers2.perform_pymx_diff(repo_path=repo_path, old_commit=payload["oldCommit"], new_commit=payload["newCommit"])
-
-            completion_event = {"taskId": task_id,
-                                "status": "success", "data": data}
-            self._mendix_env.post_message(
-                "backend:response", json.dumps(completion_event))
-
-        except Exception as e:
-            error_message = f"Error in async diff task {task_id}: {e}\n{traceback.format_exc()}"
-            self._mendix_env.post_message(
-                "backend:info", f"{error_message}")
-            error_event = {"taskId": task_id,
-                           "status": "error", "message": error_message}
-            self._mendix_env.post_message(
-                "backend:response", json.dumps(error_event))
 # endregion
 
 # region IOC & APP INITIALIZATION
@@ -486,6 +637,12 @@ class Container(containers.DeclarativeContainer):
     """The application's Inversion of Control (IoC) container."""
     config = providers.Configuration()
 
+    # --- Framework Services (DIP) ---
+    message_hub: providers.Provider[IMessageHub] = providers.Singleton(
+        MendixMessageHub,
+        post_message_func=config.post_message_func
+    )
+
     mendix_env = providers.Singleton(
         MendixEnvironmentService,
         app_context=config.app_context,
@@ -493,29 +650,43 @@ class Container(containers.DeclarativeContainer):
         post_message_func=config.post_message_func,
     )
 
-    command_handlers = providers.List(
-        providers.Singleton(GitLogCommandHandler, mendix_env=mendix_env),
-        providers.Singleton(GetGitStatusCommandHandler, mendix_env=mendix_env),
-        providers.Singleton(GitInitCommitCommandHandler,
-                            mendix_env=mendix_env),
-        providers.Singleton(GitSwitchBranchCommandHandler,
-                            mendix_env=mendix_env),
-        providers.Singleton(GitAddRemoteCommandHandler, mendix_env=mendix_env),
-        providers.Singleton(GitDeleteRemoteCommandHandler,
-                            mendix_env=mendix_env),
-        providers.Singleton(GitPushCommandHandler, mendix_env=mendix_env),
-        providers.Singleton(GitSetRemoteUrlCommandHandler,
-                            mendix_env=mendix_env),
-        providers.Singleton(GitDiffCommandHandler, mendix_env=mendix_env),
+    # --- Business Logic Handlers (OCP) ---
+    rpc_handlers = providers.List(
+        providers.Singleton(GetGitStatusRpc, mendix_env=mendix_env),
+        providers.Singleton(GetGitLogRpc, mendix_env=mendix_env),
+        providers.Singleton(GitSwitchBranchRpc, mendix_env=mendix_env),
+        providers.Singleton(GitAddRemoteRpc, mendix_env=mendix_env),
+        providers.Singleton(GitDeleteRemoteRpc, mendix_env=mendix_env),
+        providers.Singleton(GitSetRemoteUrlRpc, mendix_env=mendix_env),
+    )
+    job_handlers = providers.List(
+        providers.Singleton(GitDiffJob, mendix_env=mendix_env),
+        providers.Singleton(GitInitJob, mendix_env=mendix_env),
+        providers.Singleton(GitPushJob, mendix_env=mendix_env),
+    )
+    session_handlers = providers.List(
     )
 
+    # --- Core Controller ---
     app_controller = providers.Singleton(
         AppController,
-        handlers=command_handlers,
-        mendix_env=mendix_env,
+        rpc_handlers=rpc_handlers,
+        job_handlers=job_handlers,
+        session_handlers=session_handlers,
+        message_hub=message_hub,
     )
+# endregion
 
-# --- Application Entrypoint and Wiring ---
+
+def initialize_app():
+    container = Container()
+    # ADDED app_context and window_service for MendixEnvironmentService
+    container.config.from_dict({
+        "post_message_func": PostMessage,
+        "app_context": currentApp,
+        "window_service": dockingWindowService
+    })
+    return container
 
 
 def onMessage(e: Any):
@@ -523,39 +694,18 @@ def onMessage(e: Any):
     if e.Message != "frontend:message":
         return
     controller = container.app_controller()
-    request_object = None
     try:
         request_string = JsonSerializer.Serialize(e.Data)
         request_object = json.loads(request_string)
-        response = controller.dispatch(request_object)
-        PostMessage("backend:response", json.dumps(response))
+        controller.dispatch(request_object)
     except Exception as ex:
-        PostMessage(
-            "backend:info", f"Fatal error in onMessage: {ex}\n{traceback.format_exc()}")
-        correlation_id = request_object.get(
-            "correlationId", "unknown") if request_object else "unknown"
-        fatal_error_response = {
-            "status": "error",
-            "message": f"A fatal backend error occurred: {ex}",
-            "correlationId": correlation_id
-        }
-        PostMessage("backend:response", json.dumps(fatal_error_response))
-
-
-def initialize_app():
-    """Initializes the IoC container with the Mendix environment services."""
-    container = Container()
-    container.config.from_dict({
-        "app_context": currentApp,
-        "window_service": dockingWindowService,
-        "post_message_func": PostMessage
-    })
-    return container
+        traceback.print_exc()
 
 
 # --- Application Start ---
 PostMessage("backend:clear", '')
 container = initialize_app()
-PostMessage("backend:info", "Backend Python script initialized successfully.")
+PostMessage("backend:info",
+            "Backend Python script (Refactored) initialized successfully.")
 
 # endregion
