@@ -519,7 +519,18 @@ class GitInitJob(IJobHandler):
         commit_sha = run_git_command(repo_path, ["rev-parse", "HEAD"])
 
         # Add Mendix metadata note
-        mx_metadata_note = '{"BranchName":"","ModelerVersion":"10.24.4.77222","ModelChanges":[],"RelatedStories":[],"SolutionVersion":"","MPRFormatVersion":"Version2","HasModelerVersion":true}'
+        c = configurationService.Configuration # TODO: GET FROM IOC CONFIG
+        modelerVersion = f'{c.MendixVersion}.{c.BuildTag}'
+        metadata_dict = {
+            "BranchName": "",
+            "ModelerVersion": modelerVersion,
+            "ModelChanges": [],
+            "RelatedStories": [],
+            "SolutionVersion": "",
+            "MPRFormatVersion": "Version2",
+            "HasModelerVersion": True
+        }
+        mx_metadata_note = json.dumps(metadata_dict, ensure_ascii=False)
         run_git_command(repo_path, [
                         "notes", "--ref=mx_metadata", "add", "-m", mx_metadata_note, commit_sha])
         context.report_progress(ProgressUpdate(

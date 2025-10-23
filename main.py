@@ -1,3 +1,7 @@
+from System.Text.Json import JsonSerializer
+from dependency_injector import containers, providers
+import uuid
+import threading
 import json
 import traceback
 from typing import Any, Dict, Callable, Iterable
@@ -7,18 +11,13 @@ from abc import ABC, abstractmethod
 import clr
 clr.AddReference("System.Text.Json")
 clr.AddReference("Mendix.StudioPro.ExtensionsAPI")
-import threading
-import uuid
-from dependency_injector import containers, providers
-from System.Text.Json import JsonSerializer
 # ShowDevTools()
 
 PostMessage("backend:clear", '')
-from Mendix.StudioPro.ExtensionsAPI.BackgroundJobs import BackgroundJob
-job = BackgroundJob('test')
-jobType = job.GetType()
-assembly = jobType.Assembly
 
-all_types = list(assembly.GetTypes())
+c = configurationService.Configuration
 
-PostMessage("backend:info", f'{all_types}')
+
+PostMessage("backend:info", f'{c.MendixVersion}.{c.BuildTag}')
+PostMessage("backend:info", f'{c.EarliestSupportedLegacyMendixVersion}')
+PostMessage("backend:info", f'{c.LatestSupportedLegacyMendixVersion }')
