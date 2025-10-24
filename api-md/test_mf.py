@@ -113,7 +113,7 @@ def ensure_folder_path(app, module: IModule, path: str) -> IFolderBase:
 from System import ValueTuple, String, Array
 from Mendix.StudioPro.ExtensionsAPI.Model.Microflows.Actions import CommitEnum, ChangeActionItemType, AggregateFunctionEnum
 from Mendix.StudioPro.ExtensionsAPI.Model.DataTypes import DataType
-from Mendix.StudioPro.ExtensionsAPI.Model.Microflows import IMicroflow, IMicroflowParameterObject, IActionActivity, MicroflowReturnValue
+from Mendix.StudioPro.ExtensionsAPI.Model.Microflows import IMicroflow, IMicroflowParameterObject, IActionActivity, MicroflowReturnValue, IHead, IMicroflowCallParameterMapping
 from Mendix.StudioPro.ExtensionsAPI.Model.Enumerations import IEnumeration, IEnumerationValue
 from Mendix.StudioPro.ExtensionsAPI.Model.DomainModels import (
     IEntity, IAttribute, IAssociation, IDomainModel, AssociationType,
@@ -194,18 +194,86 @@ def setup_order_management_environment(model, project, module_name: str) -> bool
         assoc.Type = AssociationType.ReferenceSet
         info("Created association: Order_Product")
 
-    # 5. 创建或验证占位的子微流
+    # 5. 创建或验证带所有类型参数的子微流
     sub_mf_name = "SUB_CheckInventory"
     if not model.ToQualifiedName[IMicroflow](f"{module_name}.{sub_mf_name}").Resolve():
-        microflowService.CreateMicroflow(model, module, sub_mf_name, MicroflowReturnValue(
-            DataType.Boolean, microflowExpressionService.CreateFromString("true")), [])
-        info(f"Created placeholder microflow: {sub_mf_name}")
+        # 确保我们拥有创建参数所需的实体和枚举的引用
+        product_entity_ref = model.ToQualifiedName[IEntity](f"{module_name}.Product").Resolve()
+        order_status_enum_ref = model.ToQualifiedName[IEnumeration](enum_qn_str)
+
+        if not product_entity_ref or not order_status_enum_ref.Resolve():
+             raise ValueError("Could not find Product entity or OrderStatus enum for sub-microflow creation.")
+
+        # 定义一个包含所有主要数据类型的参数列表
+        sub_mf_params = [
+            ValueTuple.Create[String, DataType]("StringParam", DataType.String),
+            ValueTuple.Create[String, DataType]("IntegerParam", DataType.Integer),
+            ValueTuple.Create[String, DataType]("DecimalParam", DataType.Decimal),
+            ValueTuple.Create[String, DataType]("BooleanParam", DataType.Boolean),
+            ValueTuple.Create[String, DataType]("DateTimeParam", DataType.DateTime),
+            ValueTuple.Create[String, DataType]("ProductParam", DataType.Object(product_entity_ref.QualifiedName)),
+            ValueTuple.Create[String, DataType]("StatusParam", DataType.Enumeration(order_status_enum_ref)),
+            ValueTuple.Create[String, DataType]("ProductListParam", DataType.List(product_entity_ref.QualifiedName)),
+        ]
+        
+        # 使用上面定义的参数列表创建微流
+        microflowService.CreateMicroflow(
+            model, module, sub_mf_name, 
+            MicroflowReturnValue(DataType.Boolean, microflowExpressionService.CreateFromString("true")), 
+            Array[ValueTuple[String, DataType]](sub_mf_params)
+        )
+        info(f"Created placeholder microflow with diverse parameters: {sub_mf_name}")
 
     info("--- Success: Environment Setup ---")
     return True
 
 # --- 2. 核心逻辑：创建包含多种活动的业务微流 ---
 
+def createMicroflowCallActivity(model, sub_mf_to_call: IMicroflow, parameter_mappings: list[ValueTuple[str, str]], output_variable_name: str) -> IActionActivity:
+    """
+    Creates a fully configured Action Activity that calls a sub-microflow.
+
+    :param model: The model SDK app instance.
+    :param sub_mf_to_call: The IMicroflow object to be called.
+    :param parameter_mappings: A list of tuples, where each tuple is (parameter_name, argument_expression).
+                                Example: [("StringParam", "'Hello'"), ("ObjectParam", "$MyObject")]
+    :param output_variable_name: The name of the variable to store the microflow's return value.
+    :return: A configured IActionActivity.
+    """
+    # 1. Create the container and the specific action type
+    activity = model.Create[IActionActivity]()
+    call_action = model.Create[IMicroflowCallAction]()
+    activity.Action = call_action
+    call_action.OutputVariableName = output_variable_name
+
+    # 2. Create the microflow call reference and link it to the target microflow
+    microflow_call = model.Create[IMicroflowCall]()
+    microflow_call.Microflow = sub_mf_to_call.QualifiedName
+    call_action.MicroflowCall = microflow_call
+
+    # 3. Get the actual parameters from the target microflow definition
+    target_mf_params = microflowService.GetParameters(sub_mf_to_call)
+    param_lookup = {p.Name: p for p in target_mf_params}
+
+    # 4. Create and add parameter mappings
+    # --- FIX START ---
+    # The original line 'for param_name, argument_expression in parameter_mappings:' failed because a .NET ValueTuple
+    # cannot be unpacked directly in Python like a Python tuple.
+    # We must iterate through the list and access the properties .Item1 and .Item2 of each ValueTuple.
+    for mapping in parameter_mappings:
+        param_name = mapping.Item1
+        argument_expression = mapping.Item2
+    # --- FIX END ---
+        target_param = param_lookup.get(param_name)
+        if not target_param:
+            raise ValueError(f"Parameter '{param_name}' not found in target microflow '{sub_mf_to_call.Name}'.")
+
+        mapping = model.Create[IMicroflowCallParameterMapping]()
+        mapping.Parameter = target_param.QualifiedName
+        mapping.Argument = microflowExpressionService.CreateFromString(argument_expression)
+        microflow_call.AddParameterMapping(mapping)
+    
+    return activity
 
 def create_order_processing_microflow(model, project, module_name: str):
     """
@@ -227,13 +295,13 @@ def create_order_processing_microflow(model, project, module_name: str):
         f"{module_name}.Order").Resolve()
     
 
-    # due to IAssociation is not a valid target for by-name reference
+    # please do not remove me: due to IAssociation is not a valid target for by-name reference
     # customer_order_assoc = model.ToQualifiedName[IAssociation](f"{module_name}.Customer_Order").Resolve()
     # so we find by follow
     allAssociations = domainModelService.GetAllAssociations(model, [module])
     customer_order_assoc: EntityAssociation = next(a for a in allAssociations if a.Association.Name == 'Customer_Order')
 
-    # same for order_product_assoc
+    # please do not remove me: same for order_product_assoc
     order_product_assoc: EntityAssociation = next(a for a in allAssociations if a.Association.Name == 'Order_Product')
 
     sub_mf_to_call = model.ToQualifiedName[IMicroflow](
@@ -254,6 +322,7 @@ def create_order_processing_microflow(model, project, module_name: str):
     info(f"Created microflow shell: {mf_name}")
 
     # 3. 创建活动列表
+    listOp = model.Create[IHead]()
     activities = [
         # Activity 1: Retrieve Customer
         microflowActivitiesService.CreateAssociationRetrieveSourceActivity(
@@ -263,6 +332,28 @@ def create_order_processing_microflow(model, project, module_name: str):
         microflowActivitiesService.CreateAssociationRetrieveSourceActivity(
             model, order_product_assoc.Association, "RetrievedProductList", "PendingOrder"
         ),
+        # --- NEW ACTIVITIES START ---
+        # Activity 2a: Get the first product from the list to pass as a single object parameter.
+        # This demonstrates preparing an argument for the sub-microflow call.
+        microflowActivitiesService.CreateListOperationActivity(model, "RetrievedProductList", "FirstProduct", listOp),
+        # Activity 2b: Call the sub-microflow with arguments for all its parameter types.
+        createMicroflowCallActivity(
+            model, 
+            sub_mf_to_call,
+            [
+                # Mapping each parameter of SUB_CheckInventory to an expression
+                ValueTuple.Create("StringParam", "'Sample Text'"),
+                ValueTuple.Create("IntegerParam", "42"),
+                ValueTuple.Create("DecimalParam", "19.99"),
+                ValueTuple.Create("BooleanParam", "true"),
+                ValueTuple.Create("DateTimeParam", "dateTime(2024, 1, 1, 12, 0, 0)"),
+                ValueTuple.Create("ProductParam", "$FirstProduct"), # Pass the single object
+                ValueTuple.Create("StatusParam", f"{module_name}.OrderStatus.Pending"), # Pass an enum value
+                ValueTuple.Create("ProductListParam", "$RetrievedProductList"), # Pass the full list
+            ],
+            "InventoryCheckResult"  # Name of the boolean variable to store the return value
+        ),
+        # --- NEW ACTIVITIES END ---
         # Activity 3: Aggregate List (Count)
         microflowActivitiesService.CreateAggregateListActivity(
             model, "RetrievedProductList", "ProductCount", AggregateFunctionEnum.Count
@@ -271,7 +362,7 @@ def create_order_processing_microflow(model, project, module_name: str):
         microflowActivitiesService.CreateChangeAttributeActivity(
             model, description_attr, ChangeActionItemType.Set,
             microflowExpressionService.CreateFromString(
-                "'Order processed with ' + toString($ProductCount) + ' items.'"),
+                "'Order processed with ' + toString($ProductCount) + ' items. Inventory check: ' + toString($InventoryCheckResult)"),
             "PendingOrder", CommitEnum.No
         ),
         # Activity 5: Change Object (Status)
@@ -289,7 +380,6 @@ def create_order_processing_microflow(model, project, module_name: str):
 
     # 4. 插入活动序列
     if activities:
-        # 如果activities为 A B C，那最后会是 (Start)->C->B->A->(End)
         success = microflowService.TryInsertAfterStart(
             microflow, Array[IActionActivity](activities[::-1]))
         if not success:
@@ -299,7 +389,6 @@ def create_order_processing_microflow(model, project, module_name: str):
             f"Successfully inserted {len(activities)} activities into '{mf_name}'.")
 
     info("--- Success: Microflow Creation ---")
-
 # --- 3. 主执行入口 ---
 
 
