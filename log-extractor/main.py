@@ -50,6 +50,8 @@ class MendixEnvironmentService:
         self.app = app_context
         self.window_service = window_service
         self.post_message = post_message_func
+        # Assuming configurationService is a global available in the Mendix environment
+        self._config = configurationService.Configuration
 
     def get_project_path(self) -> str:
         return self.app.Root.DirectoryPath
@@ -57,10 +59,18 @@ class MendixEnvironmentService:
     def get_mendix_version(self) -> str:
         """Get current Mendix version from configuration."""
         try:
-            config = configurationService.Configuration
-            return f"{config.MendixVersion}.{config.BuildTag}"
+            return f"{self._config.MendixVersion}.{self._config.BuildTag}"
         except:
             return "Unknown"
+
+    def get_current_language(self) -> str:
+        """Get the current language of the Studio Pro IDE."""
+        try:
+            # Example: 'en-US', 'nl-NL', 'zh-CN'
+            return self._config.CurrentLanguage.Name
+        except:
+            return "en-US" # Default to English if not found
+        
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Callable, Iterable, Optional, Protocol, List
 import uuid
@@ -280,7 +290,6 @@ class LogExtractor:
         try:
             modules = []
             for module in currentApp.Root.GetModules():
-                dir(module)
                 module_info = {
                     "id": module.AppStorePackageId,
                     "version": module.AppStoreVersion,
@@ -318,37 +327,37 @@ class LogExtractor:
             return [{"error": f"Failed to extract JAR dependencies: {str(e)}"}]
 
     def extract_frontend_components(self) -> list:
-        """Extract frontend components and widgets."""
+        """Extract frontend components and widgets, distinguishing their types."""
         try:
             project_path = self.mendix_env.get_project_path()
-            widgets_path = os.path.join(project_path, "widgets")
-
-            if not os.path.exists(widgets_path):
-                return []
-
             components = []
-            for widget_file in glob.glob(os.path.join(widgets_path, "*.mpk")):
-                file_stat = os.stat(widget_file)
-                components.append({
-                    "name": os.path.basename(widget_file),
-                    "path": widget_file,
-                    "size": file_stat.st_size,
-                    "lastModified": datetime.fromtimestamp(file_stat.st_mtime).isoformat()
-                })
 
-            # Also check for custom widgets in javascriptsource
+            # Extract Widgets (.mpk files)
+            widgets_path = os.path.join(project_path, "widgets")
+            if os.path.exists(widgets_path):
+                for widget_file in glob.glob(os.path.join(widgets_path, "*.mpk")):
+                    file_stat = os.stat(widget_file)
+                    components.append({
+                        "name": os.path.basename(widget_file),
+                        "path": widget_file,
+                        "size": file_stat.st_size,
+                        "lastModified": datetime.fromtimestamp(file_stat.st_mtime).isoformat(),
+                        "type": "Widget"
+                    })
+
+            # Extract JavaScript Actions (.js files)
             js_source_path = os.path.join(project_path, "javascriptsource")
             if os.path.exists(js_source_path):
-                for item in os.listdir(js_source_path):
-                    item_path = os.path.join(js_source_path, item)
-                    if os.path.isdir(item_path):
+                # The glob pattern correctly finds JS actions inside module-specific action folders
+                for item_full_path in glob.glob(os.path.join(js_source_path, "*", "actions", "*.js")):
+                    if os.path.isfile(item_full_path):
+                        file_stat = os.stat(item_full_path)
                         components.append({
-                            "name": item,
-                            "path": item_path,
-                            "type": "Custom Widget",
-                            "size": sum(os.path.getsize(os.path.join(dirpath, filename))
-                                      for dirpath, dirnames, filenames in os.walk(item_path)
-                                      for filename in filenames)
+                            "name": os.path.basename(item_full_path),
+                            "path": item_full_path,
+                            "type": "JavaScript Action",
+                            "size": file_stat.st_size,
+                            "lastModified": datetime.fromtimestamp(file_stat.st_mtime).isoformat()
                         })
 
             return components
@@ -456,7 +465,19 @@ class LogExtractor:
 # ===================================================================
 
 import time
+class GetEnvironmentRpc(IRpcHandler):
+    """Get current Mendix version, project path, and IDE language."""
+    command_type = "app:getEnvironment"
 
+    def __init__(self, mendix_env: MendixEnvironmentService):
+        self.mendix_env = mendix_env
+
+    def execute(self, payload: dict) -> Any:
+        return {
+            "version": self.mendix_env.get_mendix_version(),
+            "projectPath": self.mendix_env.get_project_path(),
+            "language": self.mendix_env.get_current_language()
+        }
 class GetVersionRpc(IRpcHandler):
     """Get current Mendix version."""
     command_type = "logs:getVersion"
@@ -640,6 +661,7 @@ class Container(containers.DeclarativeContainer):
 
     # --- Business Logic Handlers (OCP) ---
     rpc_handlers = providers.List(
+        providers.Singleton(GetEnvironmentRpc, mendix_env=mendix_env),
         providers.Singleton(GetVersionRpc, mendix_env=mendix_env),
         providers.Singleton(GetStudioProLogsRpc, log_extractor=log_extractor, mendix_env=mendix_env),
         providers.Singleton(GetGitLogsRpc, log_extractor=log_extractor, mendix_env=mendix_env),

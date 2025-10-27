@@ -326,7 +326,146 @@
             return { latestMessage };
         }
 
-        // 2. REFACTORED: Panel Service powered by RxJS
+        // 3. NEW: I18N Service for multi-language support
+        const II18nService = createIdentifier('II18nService');
+        const ITranslationSource = createIdentifier('ITranslationSource');
+
+        class I18nService {
+            constructor(apiService, translationSources) {
+                this.apiService = apiService;
+                this._mergedTranslations = this._mergeSources(translationSources);
+                this.language$ = new BehaviorSubject('en'); // Default to English
+
+                this.translations$ = this.language$.pipe(
+                    map(lang => this._mergedTranslations[lang] || this._mergedTranslations['en'])
+                );
+            }
+
+            // Deep merge an array of translation source objects
+            _mergeSources(sources) {
+                const merged = {};
+                for (const source of sources) {
+                    for (const lang in source) {
+                        if (!merged[lang]) {
+                            merged[lang] = {};
+                        }
+                        // Simple, non-recursive merge is sufficient here
+                        Object.assign(merged[lang], source[lang]);
+                    }
+                }
+                return merged;
+            }
+
+            async initialize() {
+                try {
+                    const env = await this.apiService.rpc('app:getEnvironment', {});
+                    // Use only the primary language code (e.g., 'en' from 'en-US')
+                    const lang = env.language.split('-')[0].toLowerCase();
+                    this.language$.next(lang);
+                } catch (e) {
+                    console.error("Failed to fetch environment info for language.", e);
+                    // Keep the default 'en'
+                }
+            }
+        }
+        setDependencies(I18nService, [IApiService, [new Many(), ITranslationSource]]);
+
+        const coreTranslations = {
+            en: {
+                'Refresh': 'Refresh',
+                'Mendix Log Extractor': 'Mendix Log Extractor',
+                'Overview': 'Overview',
+                'Studio Pro Logs': 'Studio Pro Logs',
+                'Git Logs': 'Git Logs',
+                'Modules': 'Modules',
+                'Dependencies': 'Dependencies',
+                'Forum Export Tab': 'Forum Export',
+            },
+            zh: {
+                'Refresh': '刷新',
+                'Mendix Log Extractor': 'Mendix 日志提取器',
+                'Overview': '概览',
+                'Studio Pro Logs': 'Studio Pro 日志',
+                'Git Logs': 'Git 日志',
+                'Modules': '模块',
+                'Dependencies': '依赖项',
+                'Forum Export Tab': '论坛导出',
+            }
+        };
+
+        const sidebarTranslations = {
+            en: {
+                'Global Actions': 'Global Actions',
+                'Extract All Logs': 'Extract All Logs',
+                'Forum Export': 'Forum Export',
+                'Generate a complete diagnostic report...': 'Generate a complete diagnostic report formatted for forum posts. The result will be shown in the \'Forum Export\' tab.',
+                'Generate Export': 'Generate Export',
+                'Generating...': 'Generating...',
+            },
+            zh: {
+                'Global Actions': '全局操作',
+                'Extract All Logs': '提取所有日志',
+                'Forum Export': '论坛导出',
+                'Generate a complete diagnostic report...': '生成格式化为论坛帖子的完整诊断报告。结果将显示在“论坛导出”选项卡中。',
+                'Generate Export': '生成导出',
+                'Generating...': '生成中...',
+            }
+        };
+
+        const overviewPanelTranslations = {
+            en: {
+                'Mendix Log Extractor Overview': 'Mendix Log Extractor Overview',
+                'Mendix Version': 'Mendix Version',
+                'Project Path': 'Project Path',
+                'Click "Extract All Logs"...': 'Click "Extract All Logs" in the sidebar to begin diagnostics.',
+            },
+            zh: {
+                'Mendix Log Extractor Overview': 'Mendix 日志提取器概览',
+                'Mendix Version': 'Mendix 版本',
+                'Project Path': '项目路径',
+                'Click "Extract All Logs"...': '点击侧边栏的“提取所有日志”以开始诊断。',
+            }
+        };
+
+        const logViewerPanelTranslations = {
+            en: { 'Lines': 'Lines', 'Log Path': 'Log Path' },
+            zh: { 'Lines': '行数', 'Log Path': '日志路径' },
+        };
+
+        const modulesPanelTranslations = {
+            en: { 'Project Modules': 'Project Modules', 'Version': 'Version' },
+            zh: { 'Project Modules': '项目模块', 'Version': '版本' },
+        };
+
+        const forumPanelTranslations = {
+            en: {
+                'Forum Export Preview': 'Forum Export Preview',
+                'Copy to Clipboard': 'Copy to Clipboard',
+                'Copied!': '✓ Copied!',
+                'Go to Forum to Ask': 'Go to Forum to Ask',
+                'Click "Generate Export"...': 'Click "Generate Export" in the sidebar on the right to create forum-formatted content.',
+                'The generated report will appear here...': 'The generated report will appear here for you to review and copy.',
+            },
+            zh: {
+                'Forum Export Preview': '论坛导出预览',
+                'Copy to Clipboard': '复制到剪贴板',
+                'Copied!': '✓ 已复制！',
+                'Go to Forum to Ask': '前往论坛提问',
+                'Click "Generate Export"...': '点击右侧边栏的“生成导出”以创建论坛格式的内容。',
+                'The generated report will appear here...': '生成的报告将在此处显示，供您查看和复制。',
+            }
+        };
+
+        function useTranslation() {
+            const i18nService = useDependency(II18nService);
+            const currentTranslations = useObservable(i18nService.translations$);
+
+            const t = useCallback((key) => {
+                return currentTranslations[key] || key;
+            }, [currentTranslations]);
+
+            return { t };
+        }
         const IPanel = createIdentifier("IPanel");
         const IPanelService = createIdentifier("IPanelService");
         class PanelService {
@@ -411,6 +550,32 @@
         }
         setDependencies(PanelService, [[new Many(), IPanel]]);
 
+        const ErrorDisplay = ({ error }) => {
+            if (!error) return null;
+            const [showTraceback, setShowTraceback] = useState(false);
+
+            return (
+                <div className="mt-4 p-3 bg-red-100 text-red-800 rounded-lg border border-red-200">
+                    <div className="flex justify-between items-center">
+                        <p className="font-semibold break-all">Error: {error.message}</p>
+                        {error.traceback && (
+                            <button
+                                onClick={() => setShowTraceback(!showTraceback)}
+                                className="text-xs text-red-600 hover:text-red-800 font-medium ml-4 flex-shrink-0"
+                            >
+                                {showTraceback ? 'Hide Details' : 'Show Details'}
+                            </button>
+                        )}
+                    </div>
+                    {showTraceback && error.traceback && (
+                        <pre className="mt-3 p-2 bg-red-50 text-xs text-red-900 overflow-auto rounded font-mono">
+                            <code>{error.traceback}</code>
+                        </pre>
+                    )}
+                </div>
+            );
+        };
+
         // ===================================================================
         // ===============     BUSINESS LOGIC CODE     =======================
         // ===================================================================
@@ -455,40 +620,21 @@
         setDependencies(DataService, [IApiService]);
 
 
-        const ErrorDisplay = ({ error }) => {
-            if (!error) return null;
-            const [showTraceback, setShowTraceback] = useState(false);
-
-            return (
-                <div className="mt-4 p-3 bg-red-100 text-red-800 rounded-lg border border-red-200">
-                    <div className="flex justify-between items-center">
-                        <p className="font-semibold break-all">Error: {error.message}</p>
-                        {error.traceback && (
-                            <button
-                                onClick={() => setShowTraceback(!showTraceback)}
-                                className="text-xs text-red-600 hover:text-red-800 font-medium ml-4 flex-shrink-0"
-                            >
-                                {showTraceback ? 'Hide Details' : 'Show Details'}
-                            </button>
-                        )}
-                    </div>
-                    {showTraceback && error.traceback && (
-                        <pre className="mt-3 p-2 bg-red-50 text-xs text-red-900 overflow-auto rounded font-mono">
-                            <code>{error.traceback}</code>
-                        </pre>
-                    )}
-                </div>
-            );
-        };
-
         const OverviewPanel = () => {
+            const { t } = useTranslation();
             const dataService = useDependency(IDataService);
             const { isLoading, data, error } = useObservable(dataService.overviewData$, dataService.overviewData$.getValue());
             const extractedData = useObservable(useDependency(IPanelService).extractedData$, null);
 
             useEffect(() => {
                 if (dataService.overviewData$.getValue().data === null) {
-                    dataService.fetchOverview();
+                    // This RPC was changed in the previous step, but the old name is used here.
+                    // Correcting it to 'app:getEnvironment' to align with previous changes.
+                    dataService.apiService.rpc('app:getEnvironment', {}).then(envData => {
+                        dataService.overviewData$.next({ isLoading: false, data: envData, error: null });
+                    }).catch(err => {
+                        dataService.overviewData$.next({ isLoading: false, data: null, error: err });
+                    });
                 }
             }, []);
 
@@ -497,11 +643,11 @@
 
             return (
                 <div>
-                    <h2 className="text-xl font-semibold text-gray-700 mb-4">Mendix Log Extractor Overview</h2>
+                    <h2 className="text-xl font-semibold text-gray-700 mb-4">{t('Mendix Log Extractor Overview')}</h2>
                     {data && (
                         <div className="mb-6 p-4 bg-blue-50 rounded-lg">
-                            <p><span className="font-semibold">Mendix Version:</span> {data.version}</p>
-                            <p><span className="font-semibold">Project Path:</span> {data.projectPath}</p>
+                            <p><span className="font-semibold">{t('Mendix Version')}:</span> {data.version}</p>
+                            <p><span className="font-semibold">{t('Project Path')}:</span> {data.projectPath}</p>
                         </div>
                     )}
                     {extractedData ? (
@@ -511,7 +657,7 @@
                     ) : (
                         <div className="text-center p-6 bg-gray-50 rounded-lg">
                             <p className="text-gray-600">
-                                Click "Extract All Logs" in the sidebar to begin diagnostics.
+                                {t('Click "Extract All Logs"...')}
                             </p>
                         </div>
                     )}
@@ -520,6 +666,7 @@
         };
 
         const LogViewerPanel = ({ title, logType, icon }) => {
+            const { t } = useTranslation();
             const dataService = useDependency(IDataService);
             const dataKey = logType === 'StudioProLogs' ? 'studioProLogs$' : 'gitLogs$';
             const fetchMethod = logType === 'StudioProLogs' ? dataService.fetchStudioProLogs : dataService.fetchGitLogs;
@@ -546,7 +693,7 @@
                 return (
                     <>
                         <div className="mb-4 p-3 bg-blue-50 rounded-lg">
-                            <p><span className="font-semibold">Log Path:</span> {data.logPath || 'N/A'}</p>
+                            <p><span className="font-semibold">{t('Log Path')}:</span> {data.logPath || 'N/A'}</p>
                             <p className="text-sm text-gray-600 mt-1">
                                 {data.exists ? `✅ File exists. Showing last ${data.lines?.length || 0} of ${data.totalLines} lines.` : '❌ File not found'}
                             </p>
@@ -566,10 +713,10 @@
                 <div>
                     <div className="flex justify-between items-center mb-4">
                         <h2 className="text-xl font-bold flex items-center space-x-2">
-                            <span>{icon}</span><span>{title}</span>
+                            <span>{icon}</span><span>{t(title)}</span>
                         </h2>
                         <div className="flex items-center space-x-2">
-                            <label htmlFor="line-count" className="text-sm">Lines:</label>
+                            <label htmlFor="line-count" className="text-sm">{t('Lines')}:</label>
                             <input
                                 id="line-count"
                                 type="number"
@@ -580,7 +727,7 @@
                                 max="5000"
                             />
                             <button onClick={handleRefresh} disabled={isLoading} className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:bg-gray-400">
-                                Refresh
+                                {t('Refresh')}
                             </button>
                         </div>
                     </div>
@@ -589,67 +736,46 @@
             );
         };
         const ActionsSidebar = () => {
+            const { t } = useTranslation();
             const extractAllJob = useJob('logs:extractAll');
             const dataService = useDependency(IDataService);
-            const { isLoading: isExporting, data: exportData, error: exportError } = useObservable(dataService.forumExport$, dataService.forumExport$.getValue());
             const panelService = useDependency(IPanelService);
+            const { isLoading: isExporting, data: exportData, error: exportError } = useObservable(dataService.forumExport$, dataService.forumExport$.getValue());
 
             useEffect(() => {
                 if (extractAllJob.status === 'success' && extractAllJob.data) {
-                    // When job is done, update a shared state
                     panelService.setExtractedData(extractAllJob.data.data);
                 }
             }, [extractAllJob.status, extractAllJob.data]);
 
-            const copyToClipboard = (text) => {
-                navigator.clipboard.writeText(text).then(() => alert('Copied to clipboard!'));
-            };
+            useEffect(() => {
+                if (exportData && !isExporting && !exportError) {
+                    panelService.setActivePanel('forum');
+                }
+            }, [exportData, isExporting, exportError, panelService]);
 
             return (
                 <div className="bg-white p-4 rounded-lg shadow-md space-y-6 h-full">
-                    <div>
-                        <h3 className="font-semibold text-lg mb-2">Global Actions</h3>
-                        <button
-                            onClick={() => extractAllJob.start({})}
-                            disabled={extractAllJob.status === 'running'}
-                            className="w-full px-4 py-2 bg-blue-600 text-white font-semibold rounded-lg hover:bg-blue-700 disabled:bg-gray-400 flex items-center justify-center space-x-2"
-                        >
-                            {extractAllJob.status === 'running' && <div className="loading-spinner"></div>}
-                            <span>Extract All Logs</span>
-                        </button>
-                        {extractAllJob.status === 'running' && (
-                            <div className="mt-2 text-center text-sm">{extractAllJob.progress.message} ({extractAllJob.progress.percent.toFixed(0)}%)</div>
-                        )}
-                        <ErrorDisplay error={extractAllJob.error} />
-                    </div>
-
                     <div className="border-t pt-4">
-                        <h3 className="font-semibold text-lg mb-2">Forum Export</h3>
+                        <h3 className="font-semibold text-lg mb-2">{t('Forum Export')}</h3>
+                        <p className="text-sm text-gray-600 mb-3">
+                            {t('Generate a complete diagnostic report...')}
+                        </p>
                         <button
                             onClick={dataService.generateForumExport}
                             disabled={isExporting}
-                            className="w-full px-4 py-2 bg-green-600 text-white rounded hover:bg-green-700 disabled:bg-gray-400 mb-2"
+                            className="w-full px-4 py-2 bg-green-600 text-white rounded hover:bg-green-700 disabled:bg-gray-400 flex items-center justify-center space-x-2"
                         >
-                            Generate Export
+                            {isExporting && <div className="loading-spinner"></div>}
+                            <span>{isExporting ? t('Generating...') : t('Generate Export')}</span>
                         </button>
-                        {exportData?.formattedText && (
-                            <button
-                                onClick={() => copyToClipboard(exportData.formattedText)}
-                                className="w-full px-4 py-2 bg-gray-600 text-white rounded hover:bg-gray-700"
-                            >
-                                Copy to Clipboard
-                            </button>
-                        )}
                         <ErrorDisplay error={exportError} />
-                        {exportData && (
-                            <div className="forum-preview mt-2">{exportData.formattedText.substring(0, 200)}...</div>
-                        )}
                     </div>
                 </div>
             );
         };
-
         const ModulesPanel = () => {
+            const { t } = useTranslation();
             const { isLoading, data, error, execute } = useRpc('logs:getModulesInfo');
 
             useEffect(() => {
@@ -668,7 +794,7 @@
                                 <h4 className="font-bold text-lg mb-2">{module.name}</h4>
                                 <div className="space-y-2 text-sm">
                                     <div className="flex justify-between">
-                                        <span>Version:</span>
+                                        <span>{t('Version')}:</span>
                                         <span className="font-semibold">{module.version}</span>
                                     </div>
                                     <div className="flex justify-between">
@@ -685,13 +811,13 @@
             return (
                 <div>
                     <div className="flex justify-between items-center mb-4">
-                        <h2 className="text-xl font-bold">Project Modules</h2>
+                        <h2 className="text-xl font-bold">{t('Project Modules')}</h2>
                         <button
-                            onClick={()=>execute()}
+                            onClick={() => execute()}
                             disabled={isLoading}
                             className="px-4 py-2 bg-purple-600 text-white rounded hover:bg-purple-700 disabled:bg-gray-400"
                         >
-                            Refresh
+                            {t('Refresh')}
                         </button>
                     </div>
                     {renderModules()}
@@ -700,6 +826,7 @@
         };
 
         const DependenciesPanel = () => {
+            const { t } = useTranslation();
             const { isLoading: jarsLoading, data: jarsData, error: jarsError, execute: executeJars } = useRpc('logs:getJarDependencies');
             const { isLoading: frontendLoading, data: frontendData, error: frontendError, execute: executeFrontend } = useRpc('logs:getFrontendComponents');
 
@@ -708,21 +835,24 @@
                 executeFrontend();
             }, []);
 
-            const renderDependencies = (dependencies, title) => {
-                if (!dependencies || dependencies.length === 0) {
-                    return <div className="text-gray-500 italic">No {title.toLowerCase()} found.</div>;
+            const widgets = frontendData?.filter(item => item.type === 'Widget') || [];
+            const jsActions = frontendData?.filter(item => item.type === 'JavaScript Action') || [];
+
+            const renderList = (items, titleIfEmpty) => {
+                if (!items || items.length === 0) {
+                    return <div className="text-gray-500 italic p-4">No {titleIfEmpty.toLowerCase()} found.</div>;
                 }
 
                 return (
-                    <div className="space-y-2 max-h-100 overflow-y-auto p-1 pr-3">
-                        {dependencies.map((item, index) => (
-                            <div key={index} className="bg-white p-3 rounded-lg shadow border flex justify-between items-center">
+                    <div className="space-y-2 max-h-60 overflow-y-auto p-2 border rounded-md bg-gray-50">
+                        {items.map((item, index) => (
+                            <div key={index} className="bg-white p-2 rounded-lg shadow-sm border flex justify-between items-center">
                                 <div>
-                                    <div className="font-semibold">{item.name}</div>
-                                    <div className="text-sm text-gray-600">{item.path}</div>
+                                    <div className="font-semibold text-sm">{item.name}</div>
+                                    <div className="text-xs text-gray-500 truncate" title={item.path}>{item.path}</div>
                                 </div>
-                                <div className="text-sm text-gray-500">
-                                    {item.size ? `${(item.size / 1024).toFixed(1)} KB` : 'N/A'}
+                                <div className="text-xs text-gray-500 flex-shrink-0 ml-2">
+                                    {item.size != null ? `${(item.size / 1024).toFixed(1)} KB` : 'N/A'}
                                 </div>
                             </div>
                         ))}
@@ -731,16 +861,17 @@
             };
 
             return (
-                <div className="space-y-6">
+                <div className="space-y-8">
+                    {/* JARs section */}
                     <div>
-                        <div className="flex justify-between items-center mb-4">
-                            <h2 className="text-xl font-bold">JAR Dependencies</h2>
+                        <div className="flex justify-between items-center mb-2">
+                            <h2 className="text-xl font-bold">{t('JAR Dependencies')} ({jarsData?.length || 0})</h2>
                             <button
-                                onClick={()=>executeJars()}
+                                onClick={() => executeJars()}
                                 disabled={jarsLoading}
-                                className="px-4 py-2 bg-orange-600 text-white rounded hover:bg-orange-700 disabled:bg-gray-400"
+                                className="px-4 py-2 bg-orange-600 text-white rounded hover:bg-orange-700 disabled:bg-gray-400 text-sm"
                             >
-                                Refresh
+                                {t('Refresh')}
                             </button>
                         </div>
                         {jarsLoading ? (
@@ -748,19 +879,20 @@
                         ) : jarsError ? (
                             <ErrorDisplay error={jarsError} />
                         ) : (
-                            renderDependencies(jarsData, 'JAR Dependencies')
+                            renderList(jarsData, t('JAR Dependencies'))
                         )}
                     </div>
 
+                    {/* Frontend Components section */}
                     <div>
-                        <div className="flex justify-between items-center mb-4">
-                            <h2 className="text-xl font-bold">Frontend Components</h2>
+                        <div className="flex justify-between items-center mb-2">
+                            <h2 className="text-xl font-bold">{t('Frontend Components')}</h2>
                             <button
-                                onClick={()=>executeFrontend()}
+                                onClick={() => executeFrontend()}
                                 disabled={frontendLoading}
-                                className="px-4 py-2 bg-green-600 text-white rounded hover:bg-green-700 disabled:bg-gray-400"
+                                className="px-4 py-2 bg-green-600 text-white rounded hover:bg-green-700 disabled:bg-gray-400 text-sm"
                             >
-                                Refresh
+                                {t('Refresh')}
                             </button>
                         </div>
                         {frontendLoading ? (
@@ -768,7 +900,16 @@
                         ) : frontendError ? (
                             <ErrorDisplay error={frontendError} />
                         ) : (
-                            renderDependencies(frontendData, 'Frontend Components')
+                            <div className="space-y-4">
+                                <div>
+                                    <h3 className="font-semibold text-lg">{t('Widgets')} ({widgets.length})</h3>
+                                    {renderList(widgets, t('Widgets'))}
+                                </div>
+                                <div>
+                                    <h3 className="font-semibold text-lg">{t('JavaScript Actions')} ({jsActions.length})</h3>
+                                    {renderList(jsActions, t('JavaScript Actions'))}
+                                </div>
+                            </div>
                         )}
                     </div>
                 </div>
@@ -776,39 +917,45 @@
         };
 
         const ForumExportPanel = () => {
-            const { isLoading, data, error, execute } = useRpc('logs:generateCompleteForumExport');
-
-            const handleGenerateExport = () => {
-                execute();
-            };
+            const { t } = useTranslation();
+            const dataService = useDependency(IDataService);
+            const { isLoading, data, error } = useObservable(dataService.forumExport$, dataService.forumExport$.getValue());
+            const [isCopied, setIsCopied] = useState(false);
 
             const copyToClipboard = (text) => {
                 navigator.clipboard.writeText(text).then(() => {
-                    alert('Copied to clipboard!');
+                    setIsCopied(true);
+                    setTimeout(() => setIsCopied(false), 3000);
                 }).catch(err => {
                     console.error('Failed to copy:', err);
                     alert('Failed to copy to clipboard');
                 });
             };
 
+            const openForum = () => {
+                window.open('https://mendix.bbscloud.com/', '_blank');
+            }
+
             return (
                 <div>
                     <div className="flex justify-between items-center mb-4">
-                        <h2 className="text-xl font-bold">Forum Export</h2>
-                        <div className="space-x-2">
-                            <button
-                                onClick={handleGenerateExport}
-                                disabled={isLoading}
-                                className="px-4 py-2 bg-green-600 text-white rounded hover:bg-green-700 disabled:bg-gray-400"
-                            >
-                                Generate Export
-                            </button>
+                        <h2 className="text-xl font-bold">{t('Forum Export Preview')}</h2>
+                        <div className="flex items-center space-x-2">
+                            {isCopied && <span className="text-sm text-green-600 transition-opacity duration-300">{t('Copied!')}</span>}
                             {data?.formattedText && (
                                 <button
                                     onClick={() => copyToClipboard(data.formattedText)}
                                     className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700"
                                 >
-                                    Copy to Clipboard
+                                    {t('Copy to Clipboard')}
+                                </button>
+                            )}
+                            {isCopied && (
+                                <button
+                                    onClick={openForum}
+                                    className="px-4 py-2 bg-orange-500 text-white rounded hover:bg-orange-600 animate-pulse"
+                                >
+                                    {t('Go to Forum to Ask')}
                                 </button>
                             )}
                         </div>
@@ -817,14 +964,17 @@
                     <ErrorDisplay error={error} />
 
                     {isLoading ? (
-                        <div className="text-gray-500 italic">Generating forum export...</div>
+                        <div className="flex justify-center items-center h-64">
+                            <div className="loading-spinner" style={{ width: '40px', height: '40px' }}></div>
+                        </div>
                     ) : data?.formattedText ? (
-                        <div className="forum-preview">
-                            {data.formattedText}
+                        <div className="forum-preview h-[calc(100vh-250px)]">
+                            <pre>{data.formattedText}</pre>
                         </div>
                     ) : (
-                        <div className="text-gray-500 italic">
-                            Click "Generate Export" to create forum-formatted content.
+                        <div className="text-center text-gray-500 p-8 bg-gray-50 rounded-lg">
+                            <p>{t('Click "Generate Export"...')}</p>
+                            <p className="text-sm mt-2">{t('The generated report will appear here...')}</p>
                         </div>
                     )}
                 </div>
@@ -836,10 +986,21 @@
         // ===================================================================
 
         const AppWithDependencies = connectDependencies(() => {
+            const i18nService = useDependency(II18nService);
+            const [isI18nReady, setI18nReady] = useState(false);
+
+            useEffect(() => {
+                const init = async () => {
+                    await i18nService.initialize();
+                    setI18nReady(true);
+                }
+                init();
+            }, [i18nService]);
+
+            const { t } = useTranslation();
             const panelService = useDependency(IPanelService);
             const { openPanels, activePanel } = useObservable(panelService.state$, panelService.getInitialState());
 
-            // Setup transitions for the active panel
             const panelTransitions = useTransition(activePanel, {
                 key: panel => panel?.id,
                 from: { opacity: 0, transform: 'translateY(10px)' },
@@ -848,10 +1009,14 @@
                 config: { tension: 220, friction: 25 },
             });
 
+            if (!isI18nReady) {
+                return <div className="flex items-center justify-center h-screen">Initializing...</div>;
+            }
+
             return (
                 <div className="p-4 max-w-7xl mx-auto h-[100vh] flex flex-col">
                     <h1 className="text-3xl font-bold text-gray-800 mb-4 text-center">
-                        Mendix Log Extractor
+                        {t('Mendix Log Extractor')}
                     </h1>
                     <div className="flex-grow grid grid-cols-1 lg:grid-cols-3 gap-4 overflow-hidden">
                         {/* Main Content Area */}
@@ -866,12 +1031,11 @@
                                             : 'border-transparent text-gray-500 hover:text-gray-700'
                                             }`}
                                     >
-                                        {panel.title}
+                                        {t(panel.title)}
                                     </button>
                                 ))}
                             </div>
                             <div className="flex-grow p-4 bg-white relative overflow-auto">
-                                {/* Panel transition rendering */}
                                 {panelTransitions((style, panel) =>
                                     panel ? (
                                         <animated.div style={style} className="w-full h-full">
@@ -895,16 +1059,26 @@
             // --- Framework Registrations ---
             [IApiService, { useClass: ApiService }],
             [IPanelService, { useClass: PanelService }],
-            [IDataService, { useClass: DataService }], // Register the new service
+            [IDataService, { useClass: DataService }],
+            [II18nService, { useClass: I18nService }],
+
+            // --- Register all modular translation sources ---
+            [ITranslationSource, { useValue: coreTranslations }],
+            [ITranslationSource, { useValue: sidebarTranslations }],
+            [ITranslationSource, { useValue: overviewPanelTranslations }],
+            [ITranslationSource, { useValue: logViewerPanelTranslations }],
+            [ITranslationSource, { useValue: modulesPanelTranslations }],
+            [ITranslationSource, { useValue: forumPanelTranslations }],
 
             // --- Business Logic Registrations (as Panels) ---
-            // Note: ForumExportPanel is removed as its functionality is now in the sidebar
             [IPanel, { useValue: { id: 'overview', title: '🏠 Overview', component: OverviewPanel, defaultActive: true } }],
             [IPanel, { useValue: { id: 'studio-pro', title: '📝 Studio Pro Logs', component: () => <LogViewerPanel title="Studio Pro Logs" logType="StudioProLogs" icon="📝" />, defaultActive: true } }],
             [IPanel, { useValue: { id: 'git', title: '🔀 Git Logs', component: () => <LogViewerPanel title="Git Logs" logType="GitLogs" icon="🔀" />, defaultActive: true } }],
             [IPanel, { useValue: { id: 'modules', title: '📦 Modules', component: ModulesPanel, defaultActive: true } }],
             [IPanel, { useValue: { id: 'dependencies', title: '🏗️ Dependencies', component: DependenciesPanel, defaultActive: true } }],
+            [IPanel, { useValue: { id: 'forum', title: '🌐 Forum Export Tab', component: ForumExportPanel, defaultActive: true } }],
         ]);
+
 
         const root = ReactDOM.createRoot(document.getElementById("app"));
         root.render(<AppWithDependencies />);
