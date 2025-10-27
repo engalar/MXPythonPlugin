@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html>
+
 <head>
     <title>Impact Analysis</title>
     <!-- 框架依赖: React, Tailwind, Babel, VConsole (引入本地资源，以便离线使用) -->
@@ -13,11 +14,15 @@
     <script type="text/javascript" src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
     <link href="https://unpkg.com/vis-network/styles/vis-network.min.css" rel="stylesheet" type="text/css" />
     <style>
-        #graph-container { height: 90vh; border: 1px solid #ccc; }
+        #graph-container {
+            height: 90vh;
+            border: 1px solid #ccc;
+        }
     </style>
 </head>
+
 <body class="bg-gray-100">
-    <div id="root"></div>
+    <div id="app"></div>
     <script type="text/babel">
         const { useState, useEffect, useRef } = React;
 
@@ -93,13 +98,13 @@
                 }
                 window.parent.sendMessage("frontend:analyze_selection", null);
             };
-            
+
             return (
                 <div className="p-4 h-screen flex flex-col">
                     <div className="flex-shrink-0 mb-4">
                         <h1 className="text-xl font-bold">Impact Analysis</h1>
                         <p className="text-sm text-gray-600">{status}</p>
-                        <button 
+                        <button
                             onClick={handleAnalyzeClick}
                             className="mt-2 px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 transition"
                         >
@@ -110,8 +115,9 @@
                 </div>
             );
         }
-
-        ReactDOM.render(<App />, document.getElementById('root'));
+        const root = ReactDOM.createRoot(document.getElementById("app"));
+        root.render(<App />);
     </script>
 </body>
+
 </html>

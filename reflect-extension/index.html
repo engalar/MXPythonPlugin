@@ -390,7 +390,7 @@
             });
 
             return (
-                <div className="p-4 max-w-5xl mx-auto bg-gray-50 shadow-lg rounded-lg mt-8 flex flex-col h-[90vh]">
+                <div className="p-4 max-w-5xl mx-auto bg-gray-50 shadow-lg rounded-lg flex flex-col h-[100vh]">
                     <h1 className="text-3xl font-bold text-gray-800 mb-4 text-center">
                         Mendix Portal Control Panel (RxJS)
                     </h1>
@@ -877,8 +877,7 @@
 
 
             return (
-                <div className="p-2 max-w-7xl mx-auto bg-gray-50 shadow-lg rounded-lg mt-4 flex flex-col h-[95vh]">
-                    <h1 className="text-2xl font-bold text-gray-800 mb-2 text-center">Mendix Control Panel (Refactored)</h1>
+                <div className="p-4 max-w-5xl mx-auto bg-gray-50 shadow-lg rounded-lg flex flex-col h-[100vh]">
                     <div className="flex border-b border-gray-300">
                         {openPanels.map(panel => (
                             <button key={panel.id} onClick={() => panelService.setActivePanel(panel.id)}

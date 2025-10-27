@@ -241,10 +241,7 @@
         const App = () => {
             const viewManager = useDependency(ViewManagementService);
             return (
-                <div className="p-4 max-w-4xl mx-auto bg-gray-50 shadow-lg rounded-lg mt-8">
-                    <h1 className="text-3xl font-bold text-gray-800 mb-6 text-center">
-                        Mendix Backend Control Panel
-                    </h1>
+                <div className="p-4 max-w-5xl mx-auto bg-gray-50 shadow-lg rounded-lg flex flex-col h-[100vh]">
                     {viewManager.getViews().map((ViewComponent, index) => (
                         <Fragment key={index}><ViewComponent /></Fragment>
                     ))}
