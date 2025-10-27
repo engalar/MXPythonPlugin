@@ -36,6 +36,23 @@ class MendixEnvironmentService:
 # ===================================================================
 # ===================    CORE ABSTRACTIONS     ======================
 # ===================================================================
+def info(e):
+    PostMessage("backend:info", f'{e}')
+
+
+_dir = dir
+
+
+def dir(e):
+    PostMessage("backend:info", f'{_dir(e)}')
+
+
+def error(e):
+    PostMessage("backend:error", f'{e}')
+
+def print(e):
+    PostMessage("backend:info", e)
+
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Callable, Iterable, Optional, Protocol
 import uuid

@@ -1,0 +1,914 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <script src="assets/tailwindcss.js"></script>
+    <style>
+        .log-container {
+            max-height: 400px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            line-height: 1.4;
+        }
+
+        .forum-preview {
+            background-color: #f8f9fa;
+            border: 1px solid #e9ecef;
+            border-radius: 4px;
+            padding: 15px;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            white-space: pre-wrap;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        .loading-spinner {
+            border: 2px solid #f3f3f3;
+            border-top: 2px solid #3498db;
+            border-radius: 50%;
+            width: 20px;
+            height: 20px;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            0% {
+                transform: rotate(0deg);
+            }
+
+            100% {
+                transform: rotate(360deg);
+            }
+        }
+    </style>
+</head>
+
+<body class="bg-gray-100 font-sans">
+    <div id="app"></div>
+
+    <script src="assets/vendor-bundle.umd.js"></script>
+    <script src="assets/babel.min.js"></script>
+    <script type="text/babel">
+
+        // ===================================================================
+        // ===================     FRAMEWORK CODE     ========================
+        // ===================================================================
+        // This section contains the reusable, application-agnostic core.
+        // You should not need to modify this section to add new features.
+        // -------------------------------------------------------------------
+
+        // 等价于
+        // import * as React from 'react';
+        // import ReactDOM from 'react-dom/client';
+        // import * as redi from '@wendellhu/redi';
+        // import * as rediReact from '@wendellhu/redi/react-bindings';
+        // import * as rxjs from 'rxjs';
+        // import * as reactSpring from '@react-spring/web';
+        const { React, ReactDOM, redi, rediReact, rxjs, reactSpring } = globalThis.__tmp;
+        delete globalThis.__tmp;
+
+        // keep unused import for redi and rediReact
+        const {
+            Inject,
+            Injector,
+            LookUp,
+            Many,
+            Optional,
+            Quantity,
+            RediError,
+            Self,
+            SkipSelf,
+            WithNew,
+            createIdentifier,
+            forwardRef,
+            isAsyncDependencyItem,
+            isAsyncHook,
+            isClassDependencyItem,
+            isCtor,
+            isDisposable,
+            isFactoryDependencyItem,
+            isValueDependencyItem,
+            setDependencies,
+        } = redi;
+        const {
+            RediConsumer,
+            RediContext,
+            RediProvider,
+            WithDependency,
+            connectDependencies,
+            connectInjector,
+            useDependency,
+            useInjector,
+            useObservable,
+            useUpdateBinder,
+        } = rediReact;
+        const {
+            useState,
+            useEffect,
+            useRef,
+            useReducer,
+            Fragment,
+            useCallback,
+            createContext,
+            useContext,
+        } = React;
+        const { BehaviorSubject, Subject, fromEvent, map, filter } = rxjs;
+        const { useSpring, useTransition, animated } = reactSpring;
+
+        // 1. FRAMEWORK: CORE COMMUNICATION SERVICES
+
+        const IApiService = createIdentifier('IApiService');
+
+        class ApiService {
+            constructor() {
+                this.reqIdCounter = 0;
+                this.pendingRpcs = new Map();
+                this.activeJobs = new Map();
+                this.activeSessions = new Map();
+                this.broadcastChannels = new Map();
+
+                fromEvent(window, 'message')
+                    .pipe(filter(event => event.data && event.data.type === 'backendResponse'))
+                    .pipe(map(event => JSON.parse(event.data.data)))
+                    .subscribe(msg => this._handleBackendMessage(msg));
+            }
+
+            // --- Public Methods for Hooks ---
+
+            rpc(method, params) {
+                return new Promise((resolve, reject) => {
+                    const reqId = `req-${this.reqIdCounter++}`;
+                    this.pendingRpcs.set(reqId, { resolve, reject });
+                    this._sendMessage({ type: 'RPC', reqId, method, params });
+                    setTimeout(() => {
+                        if (this.pendingRpcs.has(reqId)) {
+                            this.pendingRpcs.delete(reqId);
+                            reject(new Error(`RPC call '${method}' timed out.`));
+                        }
+                    }, 10000);
+                });
+            }
+
+            startJob(method, params) {
+                const subject = new Subject();
+                const reqId = `req-${this.reqIdCounter++}`;
+
+                const promise = new Promise((resolve, reject) => {
+                    this.pendingRpcs.set(reqId, {
+                        resolve: ({ jobId }) => {
+                            this.activeJobs.set(jobId, subject);
+                            resolve({ jobId }); // Resolve promise with jobId once started
+                        },
+                        reject
+                    });
+                });
+
+                this._sendMessage({ type: 'JOB_START', reqId, method, params });
+                return { startPromise: promise, updates$: subject.asObservable() };
+            }
+
+            connectSession(channel, payload) {
+                const sessionId = `${channel}-${Math.random().toString(36).substr(2, 9)}`;
+                if (!this.activeSessions.has(sessionId)) {
+                    const subject = new Subject();
+                    this.activeSessions.set(sessionId, subject);
+                    this._sendMessage({ type: 'SESSION_CONNECT', sessionId, channel, payload });
+                }
+                return { sessionId, messages$: this.activeSessions.get(sessionId).asObservable() };
+            }
+
+            disconnectSession(sessionId, channel) {
+                if (this.activeSessions.has(sessionId)) {
+                    this.activeSessions.get(sessionId).complete();
+                    this.activeSessions.delete(sessionId);
+                    this._sendMessage({ type: 'SESSION_DISCONNECT', sessionId, channel });
+                }
+            }
+
+            subscribeBroadcast(channel) {
+                if (!this.broadcastChannels.has(channel)) {
+                    this.broadcastChannels.set(channel, new Subject());
+                }
+                return this.broadcastChannels.get(channel).asObservable();
+            }
+
+            // --- Internal Message Handling ---
+
+            _sendMessage(data) {
+                window.parent.sendMessage('frontend:message', data);
+            }
+
+            _handleBackendMessage(msg) {
+                const { type, reqId, jobId, sessionId, channel } = msg;
+
+                switch (type) {
+                    case 'RPC_SUCCESS':
+                        this.pendingRpcs.get(reqId)?.resolve(msg.data);
+                        this.pendingRpcs.delete(reqId);
+                        break;
+                    case 'RPC_ERROR':
+                        this.pendingRpcs.get(reqId)?.reject({ message: msg.message, traceback: msg.traceback });
+                        this.pendingRpcs.delete(reqId);
+                        break;
+                    case 'JOB_STARTED':
+                        this.pendingRpcs.get(reqId)?.resolve({ jobId });
+                        this.pendingRpcs.delete(reqId);
+                        break;
+                    case 'JOB_PROGRESS':
+                        this.activeJobs.get(jobId)?.next({ type: 'progress', ...msg });
+                        break;
+                    case 'JOB_SUCCESS':
+                        this.activeJobs.get(jobId)?.next({ type: 'success', ...msg });
+                        this.activeJobs.get(jobId)?.complete();
+                        this.activeJobs.delete(jobId);
+                        break;
+                    case 'JOB_ERROR':
+                        this.activeJobs.get(jobId)?.next({ type: 'error', ...msg });
+                        this.activeJobs.get(jobId)?.complete();
+                        this.activeJobs.delete(jobId);
+                        break;
+                    case 'EVENT_BROADCAST':
+                        this.broadcastChannels.get(channel)?.next(msg.data);
+                        break;
+                    case 'EVENT_SESSION':
+                        this.activeSessions.get(sessionId)?.next(msg.data);
+                        break;
+                }
+            }
+        }
+        setDependencies(ApiService, []);
+
+        // --- High-Level React Hooks (Simplifying Boilerplate) ---
+
+        function useRpc(method) {
+            const api = useDependency(IApiService);
+            const [state, setState] = useState({ isLoading: false, data: null, error: null });
+
+            const execute = useCallback(async (params) => {
+                setState({ isLoading: true, data: null, error: null });
+                try {
+                    const result = await api.rpc(method, params);
+                    setState({ isLoading: false, data: result, error: null });
+                    return result;
+                } catch (err) {
+                    setState({ isLoading: false, data: null, error: err });
+                    throw err;
+                }
+            }, [api, method]);
+            return { ...state, execute };
+        }
+
+        const initialJobState = { status: 'idle', progress: { percent: 0, message: '' }, data: null, error: null };
+        function useJob(method) {
+            const api = useDependency(IApiService);
+            const [state, setState] = useState(initialJobState);
+            const subRef = useRef(null);
+
+            const start = useCallback((params) => {
+                setState({ ...initialJobState, status: 'starting' });
+                const { startPromise, updates$ } = api.startJob(method, params);
+
+                startPromise.then(({ jobId }) => {
+                    subRef.current = updates$.subscribe({
+                        next: (update) => {
+                            if (update.type === "JOB_PROGRESS") setState(s => ({ ...s, status: 'running', progress: update.progress }));
+                            else if (update.type === "JOB_SUCCESS") setState(s => {
+                                s.progress.percent = 100;
+                                return { ...s, status: 'success', data: update.data };
+                            })
+                            else if (update.type === 'JOB_ERROR') setState(s => ({ ...s, status: 'error', error: { message: update.message, traceback: update.traceback } }));
+                        },
+                        error: (err) => setState(s => ({ ...s, status: 'error', error: err })),
+                        complete: () => {
+                            // Handled by success/error messages
+                        }
+                    });
+                }).catch(err => {
+                    setState({ ...initialJobState, status: 'error', error: err });
+                });
+            }, [api, method]);
+
+            useEffect(() => {
+                // Cleanup subscription on unmount
+                return () => subRef.current?.unsubscribe();
+            }, []);
+
+            return { ...state, start };
+        }
+
+        function usePush(channel, options = {}) {
+            const api = useDependency(IApiService);
+            const [latestMessage, setLatestMessage] = useState(null);
+
+            useEffect(() => {
+                let sub;
+                let sessionId;
+
+                if (options.isSession) {
+                    const session = api.connectSession(channel, options.payload);
+                    sessionId = session.sessionId;
+                    sub = session.messages$.subscribe(setLatestMessage);
+                } else {
+                    sub = api.subscribeBroadcast(channel).subscribe(setLatestMessage);
+                }
+
+                return () => {
+                    sub?.unsubscribe();
+                    if (sessionId) {
+                        api.disconnectSession(sessionId, channel);
+                    }
+                };
+            }, [api, channel, options.isSession, JSON.stringify(options.payload)]); // re-run if payload changes
+
+            return { latestMessage };
+        }
+
+        // 2. REFACTORED: Panel Service powered by RxJS
+        const IPanel = createIdentifier("IPanel");
+        const IPanelService = createIdentifier("IPanelService");
+        class PanelService {
+            constructor(panels) {
+                this.allPanels = new Map(panels.map(p => [p.id, p]));
+                this._state$ = new BehaviorSubject(this.getInitialState());
+                this.state$ = this._state$.asObservable();
+
+                // For shared data from the extract-all job
+                this.extractedData$ = new BehaviorSubject(null);
+            }
+
+            setExtractedData = (data) => {
+                this.extractedData$.next(data);
+            }
+
+            getInitialState() {
+                const initialOpenIds = new Set(
+                    Array.from(this.allPanels.values())
+                        .filter(p => p.defaultActive)
+                        .map(p => p.id)
+                );
+                const initialActiveId = Array.from(this.allPanels.values())
+                    .find(p => p.defaultActive)?.id || null;
+                return this._computeState(initialOpenIds, initialActiveId);
+            }
+
+            // Private method to compute the full state object from IDs
+            _computeState(openPanelIds, activePanelId) {
+                const openPanels = Array.from(openPanelIds)
+                    .map(id => this.allPanels.get(id))
+                    .filter(Boolean); // Filter out potential undefineds
+                const activePanel = activePanelId ? this.allPanels.get(activePanelId) : null;
+
+                return { openPanels, activePanel };
+            }
+
+            // Private method to update the stream
+            _updateState(newOpenIds, newActiveId) {
+                const newState = this._computeState(newOpenIds, newActiveId);
+                this._state$.next(newState);
+            }
+
+            // --- Public API for Panel Control ---
+            openPanel(id) {
+                if (!this.allPanels.has(id)) return;
+
+                const currentState = this._state$.getValue();
+                const currentOpenIds = new Set(currentState.openPanels.map(p => p.id));
+
+                if (currentOpenIds.has(id)) {
+                    this.setActivePanel(id);
+                    return;
+                }
+
+                currentOpenIds.add(id);
+                this._updateState(currentOpenIds, id);
+            }
+
+            closePanel(id) {
+                const currentState = this._state$.getValue();
+                const currentOpenIds = new Set(currentState.openPanels.map(p => p.id));
+                if (!currentOpenIds.has(id)) return;
+
+                currentOpenIds.delete(id);
+                let newActiveId = currentState.activePanel?.id;
+                if (newActiveId === id) {
+                    newActiveId = currentOpenIds.values().next().value || null;
+                }
+                this._updateState(currentOpenIds, newActiveId);
+            }
+
+            setActivePanel(id) {
+                const currentState = this._state$.getValue();
+                if (currentState.activePanel?.id === id) return;
+
+                const currentOpenIds = new Set(currentState.openPanels.map(p => p.id));
+                if (!currentOpenIds.has(id)) return; // Can't activate a panel that isn't open
+
+                this._updateState(currentOpenIds, id);
+            }
+        }
+        setDependencies(PanelService, [[new Many(), IPanel]]);
+
+        // ===================================================================
+        // ===============     BUSINESS LOGIC CODE     =======================
+        // ===================================================================
+        // This section contains your feature-specific components (Views).
+        // To add a new feature, add your new Component here and register
+        // it as an `IView` in the IOC Configuration section below.
+        // -------------------------------------------------------------------
+        const IDataService = createIdentifier('IDataService');
+
+        class DataService {
+            constructor(apiService) {
+                this.apiService = apiService;
+
+                // Observables for different data pieces
+                this.overviewData$ = new BehaviorSubject({ isLoading: true, data: null, error: null });
+                this.studioProLogs$ = new BehaviorSubject({ isLoading: true, data: null, error: null });
+                this.gitLogs$ = new BehaviorSubject({ isLoading: true, data: null, error: null });
+                this.modules$ = new BehaviorSubject({ isLoading: true, data: null, error: null });
+                this.dependencies$ = new BehaviorSubject({ isLoading: true, data: null, error: null });
+                this.frontendComponents$ = new BehaviorSubject({ isLoading: true, data: null, error: null });
+                this.forumExport$ = new BehaviorSubject({ isLoading: false, data: null, error: null });
+            }
+
+            async _fetchData(method, params, subject$) {
+                subject$.next({ ...subject$.getValue(), isLoading: true, error: null });
+                try {
+                    const data = await this.apiService.rpc(method, params);
+                    subject$.next({ isLoading: false, data, error: null });
+                } catch (error) {
+                    subject$.next({ isLoading: false, data: null, error });
+                }
+            }
+
+            fetchOverview = () => this._fetchData('logs:getVersion', {}, this.overviewData$);
+            fetchStudioProLogs = (params) => this._fetchData('logs:getStudioProLogs', params, this.studioProLogs$);
+            fetchGitLogs = (params) => this._fetchData('logs:getGitLogs', params, this.gitLogs$);
+            fetchModules = () => this._fetchData('logs:getModulesInfo', {}, this.modules$);
+            fetchJarDependencies = () => this._fetchData('logs:getJarDependencies', {}, this.dependencies$);
+            fetchFrontendComponents = () => this._fetchData('logs:getFrontendComponents', {}, this.frontendComponents$);
+            generateForumExport = () => this._fetchData('logs:generateCompleteForumExport', {}, this.forumExport$);
+        }
+        setDependencies(DataService, [IApiService]);
+
+
+        const ErrorDisplay = ({ error }) => {
+            if (!error) return null;
+            const [showTraceback, setShowTraceback] = useState(false);
+
+            return (
+                <div className="mt-4 p-3 bg-red-100 text-red-800 rounded-lg border border-red-200">
+                    <div className="flex justify-between items-center">
+                        <p className="font-semibold break-all">Error: {error.message}</p>
+                        {error.traceback && (
+                            <button
+                                onClick={() => setShowTraceback(!showTraceback)}
+                                className="text-xs text-red-600 hover:text-red-800 font-medium ml-4 flex-shrink-0"
+                            >
+                                {showTraceback ? 'Hide Details' : 'Show Details'}
+                            </button>
+                        )}
+                    </div>
+                    {showTraceback && error.traceback && (
+                        <pre className="mt-3 p-2 bg-red-50 text-xs text-red-900 overflow-auto rounded font-mono">
+                            <code>{error.traceback}</code>
+                        </pre>
+                    )}
+                </div>
+            );
+        };
+
+        const OverviewPanel = () => {
+            const dataService = useDependency(IDataService);
+            const { isLoading, data, error } = useObservable(dataService.overviewData$, dataService.overviewData$.getValue());
+            const extractedData = useObservable(useDependency(IPanelService).extractedData$, null);
+
+            useEffect(() => {
+                if (dataService.overviewData$.getValue().data === null) {
+                    dataService.fetchOverview();
+                }
+            }, []);
+
+            if (isLoading && !data) return <div>Loading project info...</div>;
+            if (error) return <ErrorDisplay error={error} />;
+
+            return (
+                <div>
+                    <h2 className="text-xl font-semibold text-gray-700 mb-4">Mendix Log Extractor Overview</h2>
+                    {data && (
+                        <div className="mb-6 p-4 bg-blue-50 rounded-lg">
+                            <p><span className="font-semibold">Mendix Version:</span> {data.version}</p>
+                            <p><span className="font-semibold">Project Path:</span> {data.projectPath}</p>
+                        </div>
+                    )}
+                    {extractedData ? (
+                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                            {/* Cards showing summary, similar to original */}
+                        </div>
+                    ) : (
+                        <div className="text-center p-6 bg-gray-50 rounded-lg">
+                            <p className="text-gray-600">
+                                Click "Extract All Logs" in the sidebar to begin diagnostics.
+                            </p>
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
+        const LogViewerPanel = ({ title, logType, icon }) => {
+            const dataService = useDependency(IDataService);
+            const dataKey = logType === 'StudioProLogs' ? 'studioProLogs$' : 'gitLogs$';
+            const fetchMethod = logType === 'StudioProLogs' ? dataService.fetchStudioProLogs : dataService.fetchGitLogs;
+
+            const { isLoading, data, error } = useObservable(dataService[dataKey], dataService[dataKey].getValue());
+            const [lineCount, setLineCount] = useState(100);
+
+            const handleRefresh = () => {
+                fetchMethod({ limit: parseInt(lineCount, 10) || 100 });
+            };
+
+            useEffect(() => {
+                if (dataService[dataKey].getValue().data === null) {
+                    handleRefresh();
+                }
+            }, []);
+
+            const renderLogContent = () => {
+                if (isLoading && !data) return <div className="text-gray-500 italic">Loading...</div>;
+                if (error) return <ErrorDisplay error={error} />;
+                if (!data) return <div className="text-gray-500 italic">No data available.</div>;
+                if (data.error) return <div className="text-red-600">Error: {data.error}</div>;
+
+                return (
+                    <>
+                        <div className="mb-4 p-3 bg-blue-50 rounded-lg">
+                            <p><span className="font-semibold">Log Path:</span> {data.logPath || 'N/A'}</p>
+                            <p className="text-sm text-gray-600 mt-1">
+                                {data.exists ? `✅ File exists. Showing last ${data.lines?.length || 0} of ${data.totalLines} lines.` : '❌ File not found'}
+                            </p>
+                        </div>
+                        {data.lines && data.lines.length > 0 ? (
+                            <div className="log-container bg-gray-900 text-green-400 p-4 rounded-lg">
+                                {data.lines.map((line, index) => <div key={index}>{line.trim()}</div>)}
+                            </div>
+                        ) : (
+                            <div className="text-gray-500 italic">No log entries found.</div>
+                        )}
+                    </>
+                );
+            };
+
+            return (
+                <div>
+                    <div className="flex justify-between items-center mb-4">
+                        <h2 className="text-xl font-bold flex items-center space-x-2">
+                            <span>{icon}</span><span>{title}</span>
+                        </h2>
+                        <div className="flex items-center space-x-2">
+                            <label htmlFor="line-count" className="text-sm">Lines:</label>
+                            <input
+                                id="line-count"
+                                type="number"
+                                value={lineCount}
+                                onChange={(e) => setLineCount(e.target.value)}
+                                className="w-20 p-1 border rounded"
+                                min="1"
+                                max="5000"
+                            />
+                            <button onClick={handleRefresh} disabled={isLoading} className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:bg-gray-400">
+                                Refresh
+                            </button>
+                        </div>
+                    </div>
+                    {renderLogContent()}
+                </div>
+            );
+        };
+        const ActionsSidebar = () => {
+            const extractAllJob = useJob('logs:extractAll');
+            const dataService = useDependency(IDataService);
+            const { isLoading: isExporting, data: exportData, error: exportError } = useObservable(dataService.forumExport$, dataService.forumExport$.getValue());
+            const panelService = useDependency(IPanelService);
+
+            useEffect(() => {
+                if (extractAllJob.status === 'success' && extractAllJob.data) {
+                    // When job is done, update a shared state
+                    panelService.setExtractedData(extractAllJob.data.data);
+                }
+            }, [extractAllJob.status, extractAllJob.data]);
+
+            const copyToClipboard = (text) => {
+                navigator.clipboard.writeText(text).then(() => alert('Copied to clipboard!'));
+            };
+
+            return (
+                <div className="bg-white p-4 rounded-lg shadow-md space-y-6 h-full">
+                    <div>
+                        <h3 className="font-semibold text-lg mb-2">Global Actions</h3>
+                        <button
+                            onClick={() => extractAllJob.start({})}
+                            disabled={extractAllJob.status === 'running'}
+                            className="w-full px-4 py-2 bg-blue-600 text-white font-semibold rounded-lg hover:bg-blue-700 disabled:bg-gray-400 flex items-center justify-center space-x-2"
+                        >
+                            {extractAllJob.status === 'running' && <div className="loading-spinner"></div>}
+                            <span>Extract All Logs</span>
+                        </button>
+                        {extractAllJob.status === 'running' && (
+                            <div className="mt-2 text-center text-sm">{extractAllJob.progress.message} ({extractAllJob.progress.percent.toFixed(0)}%)</div>
+                        )}
+                        <ErrorDisplay error={extractAllJob.error} />
+                    </div>
+
+                    <div className="border-t pt-4">
+                        <h3 className="font-semibold text-lg mb-2">Forum Export</h3>
+                        <button
+                            onClick={dataService.generateForumExport}
+                            disabled={isExporting}
+                            className="w-full px-4 py-2 bg-green-600 text-white rounded hover:bg-green-700 disabled:bg-gray-400 mb-2"
+                        >
+                            Generate Export
+                        </button>
+                        {exportData?.formattedText && (
+                            <button
+                                onClick={() => copyToClipboard(exportData.formattedText)}
+                                className="w-full px-4 py-2 bg-gray-600 text-white rounded hover:bg-gray-700"
+                            >
+                                Copy to Clipboard
+                            </button>
+                        )}
+                        <ErrorDisplay error={exportError} />
+                        {exportData && (
+                            <div className="forum-preview mt-2">{exportData.formattedText.substring(0, 200)}...</div>
+                        )}
+                    </div>
+                </div>
+            );
+        };
+
+        const ModulesPanel = () => {
+            const { isLoading, data, error, execute } = useRpc('logs:getModulesInfo');
+
+            useEffect(() => {
+                execute();
+            }, []);
+
+            const renderModules = () => {
+                if (isLoading) return <div className="text-gray-500 italic">Loading...</div>;
+                if (error) return <ErrorDisplay error={error} />;
+                if (!data || data.length === 0) return <div className="text-gray-500 italic">No modules found.</div>;
+
+                return (
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                        {data.map((module, index) => (
+                            <div key={index} className="bg-white p-4 rounded-lg shadow border">
+                                <h4 className="font-bold text-lg mb-2">{module.name}</h4>
+                                <div className="space-y-2 text-sm">
+                                    <div className="flex justify-between">
+                                        <span>Version:</span>
+                                        <span className="font-semibold">{module.version}</span>
+                                    </div>
+                                    <div className="flex justify-between">
+                                        <span>Id:</span>
+                                        <span className="font-semibold">{module.id}</span>
+                                    </div>
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                );
+            };
+
+            return (
+                <div>
+                    <div className="flex justify-between items-center mb-4">
+                        <h2 className="text-xl font-bold">Project Modules</h2>
+                        <button
+                            onClick={()=>execute()}
+                            disabled={isLoading}
+                            className="px-4 py-2 bg-purple-600 text-white rounded hover:bg-purple-700 disabled:bg-gray-400"
+                        >
+                            Refresh
+                        </button>
+                    </div>
+                    {renderModules()}
+                </div>
+            );
+        };
+
+        const DependenciesPanel = () => {
+            const { isLoading: jarsLoading, data: jarsData, error: jarsError, execute: executeJars } = useRpc('logs:getJarDependencies');
+            const { isLoading: frontendLoading, data: frontendData, error: frontendError, execute: executeFrontend } = useRpc('logs:getFrontendComponents');
+
+            useEffect(() => {
+                executeJars();
+                executeFrontend();
+            }, []);
+
+            const renderDependencies = (dependencies, title) => {
+                if (!dependencies || dependencies.length === 0) {
+                    return <div className="text-gray-500 italic">No {title.toLowerCase()} found.</div>;
+                }
+
+                return (
+                    <div className="space-y-2 max-h-100 overflow-y-auto p-1 pr-3">
+                        {dependencies.map((item, index) => (
+                            <div key={index} className="bg-white p-3 rounded-lg shadow border flex justify-between items-center">
+                                <div>
+                                    <div className="font-semibold">{item.name}</div>
+                                    <div className="text-sm text-gray-600">{item.path}</div>
+                                </div>
+                                <div className="text-sm text-gray-500">
+                                    {item.size ? `${(item.size / 1024).toFixed(1)} KB` : 'N/A'}
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                );
+            };
+
+            return (
+                <div className="space-y-6">
+                    <div>
+                        <div className="flex justify-between items-center mb-4">
+                            <h2 className="text-xl font-bold">JAR Dependencies</h2>
+                            <button
+                                onClick={()=>executeJars()}
+                                disabled={jarsLoading}
+                                className="px-4 py-2 bg-orange-600 text-white rounded hover:bg-orange-700 disabled:bg-gray-400"
+                            >
+                                Refresh
+                            </button>
+                        </div>
+                        {jarsLoading ? (
+                            <div className="text-gray-500 italic">Loading JAR dependencies...</div>
+                        ) : jarsError ? (
+                            <ErrorDisplay error={jarsError} />
+                        ) : (
+                            renderDependencies(jarsData, 'JAR Dependencies')
+                        )}
+                    </div>
+
+                    <div>
+                        <div className="flex justify-between items-center mb-4">
+                            <h2 className="text-xl font-bold">Frontend Components</h2>
+                            <button
+                                onClick={()=>executeFrontend()}
+                                disabled={frontendLoading}
+                                className="px-4 py-2 bg-green-600 text-white rounded hover:bg-green-700 disabled:bg-gray-400"
+                            >
+                                Refresh
+                            </button>
+                        </div>
+                        {frontendLoading ? (
+                            <div className="text-gray-500 italic">Loading frontend components...</div>
+                        ) : frontendError ? (
+                            <ErrorDisplay error={frontendError} />
+                        ) : (
+                            renderDependencies(frontendData, 'Frontend Components')
+                        )}
+                    </div>
+                </div>
+            );
+        };
+
+        const ForumExportPanel = () => {
+            const { isLoading, data, error, execute } = useRpc('logs:generateCompleteForumExport');
+
+            const handleGenerateExport = () => {
+                execute();
+            };
+
+            const copyToClipboard = (text) => {
+                navigator.clipboard.writeText(text).then(() => {
+                    alert('Copied to clipboard!');
+                }).catch(err => {
+                    console.error('Failed to copy:', err);
+                    alert('Failed to copy to clipboard');
+                });
+            };
+
+            return (
+                <div>
+                    <div className="flex justify-between items-center mb-4">
+                        <h2 className="text-xl font-bold">Forum Export</h2>
+                        <div className="space-x-2">
+                            <button
+                                onClick={handleGenerateExport}
+                                disabled={isLoading}
+                                className="px-4 py-2 bg-green-600 text-white rounded hover:bg-green-700 disabled:bg-gray-400"
+                            >
+                                Generate Export
+                            </button>
+                            {data?.formattedText && (
+                                <button
+                                    onClick={() => copyToClipboard(data.formattedText)}
+                                    className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700"
+                                >
+                                    Copy to Clipboard
+                                </button>
+                            )}
+                        </div>
+                    </div>
+
+                    <ErrorDisplay error={error} />
+
+                    {isLoading ? (
+                        <div className="text-gray-500 italic">Generating forum export...</div>
+                    ) : data?.formattedText ? (
+                        <div className="forum-preview">
+                            {data.formattedText}
+                        </div>
+                    ) : (
+                        <div className="text-gray-500 italic">
+                            Click "Generate Export" to create forum-formatted content.
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
+        // ===================================================================
+        // ==============     IOC & APP INITIALIZATION     ===================
+        // ===================================================================
+
+        const AppWithDependencies = connectDependencies(() => {
+            const panelService = useDependency(IPanelService);
+            const { openPanels, activePanel } = useObservable(panelService.state$, panelService.getInitialState());
+
+            // Setup transitions for the active panel
+            const panelTransitions = useTransition(activePanel, {
+                key: panel => panel?.id,
+                from: { opacity: 0, transform: 'translateY(10px)' },
+                enter: { opacity: 1, transform: 'translateY(0px)' },
+                leave: { opacity: 0, transform: 'translateY(-10px)', position: 'absolute', top: 0, left: 0, right: 0 },
+                config: { tension: 220, friction: 25 },
+            });
+
+            return (
+                <div className="p-4 max-w-7xl mx-auto h-[100vh] flex flex-col">
+                    <h1 className="text-3xl font-bold text-gray-800 mb-4 text-center">
+                        Mendix Log Extractor
+                    </h1>
+                    <div className="flex-grow grid grid-cols-1 lg:grid-cols-3 gap-4 overflow-hidden">
+                        {/* Main Content Area */}
+                        <div className="lg:col-span-2 bg-gray-50 shadow-lg rounded-lg flex flex-col">
+                            <div className="flex border-b border-gray-300 flex-wrap">
+                                {openPanels.map(panel => (
+                                    <button
+                                        key={panel.id}
+                                        onClick={() => panelService.setActivePanel(panel.id)}
+                                        className={`px-4 py-2 text-sm font-medium border-b-2 ${panel.id === activePanel?.id
+                                            ? 'border-blue-600 text-blue-700'
+                                            : 'border-transparent text-gray-500 hover:text-gray-700'
+                                            }`}
+                                    >
+                                        {panel.title}
+                                    </button>
+                                ))}
+                            </div>
+                            <div className="flex-grow p-4 bg-white relative overflow-auto">
+                                {/* Panel transition rendering */}
+                                {panelTransitions((style, panel) =>
+                                    panel ? (
+                                        <animated.div style={style} className="w-full h-full">
+                                            <panel.component />
+                                        </animated.div>
+                                    ) : (
+                                        <div>No panel selected.</div>
+                                    )
+                                )}
+                            </div>
+                        </div>
+
+                        {/* Sidebar */}
+                        <div className="lg:col-span-1">
+                            <ActionsSidebar />
+                        </div>
+                    </div>
+                </div>
+            );
+        }, [
+            // --- Framework Registrations ---
+            [IApiService, { useClass: ApiService }],
+            [IPanelService, { useClass: PanelService }],
+            [IDataService, { useClass: DataService }], // Register the new service
+
+            // --- Business Logic Registrations (as Panels) ---
+            // Note: ForumExportPanel is removed as its functionality is now in the sidebar
+            [IPanel, { useValue: { id: 'overview', title: '🏠 Overview', component: OverviewPanel, defaultActive: true } }],
+            [IPanel, { useValue: { id: 'studio-pro', title: '📝 Studio Pro Logs', component: () => <LogViewerPanel title="Studio Pro Logs" logType="StudioProLogs" icon="📝" />, defaultActive: true } }],
+            [IPanel, { useValue: { id: 'git', title: '🔀 Git Logs', component: () => <LogViewerPanel title="Git Logs" logType="GitLogs" icon="🔀" />, defaultActive: true } }],
+            [IPanel, { useValue: { id: 'modules', title: '📦 Modules', component: ModulesPanel, defaultActive: true } }],
+            [IPanel, { useValue: { id: 'dependencies', title: '🏗️ Dependencies', component: DependenciesPanel, defaultActive: true } }],
+        ]);
+
+        const root = ReactDOM.createRoot(document.getElementById("app"));
+        root.render(<AppWithDependencies />);
+    </script>
+</body>
+
+</html>
