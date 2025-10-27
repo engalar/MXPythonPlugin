@@ -209,7 +209,48 @@ class AppController:
 # To add a new feature, create a new class implementing ICommandHandler
 # or IAsyncCommandHandler, and register it in the Container below.
 # -------------------------------------------------------------------
+from pathlib import Path
 
+def sanitize_path_prefix_pathlib(file_path: str, sensitive_prefix: str = None, replacement: str = "~") -> str:
+    """
+    使用 pathlib 检查路径是否以敏感前缀开始，并进行脱敏。
+    默认脱敏用户的 HOME 目录。
+    """
+    try:
+        # 1. 确保敏感前缀是 Path 对象，并进行绝对路径规范化
+        if sensitive_prefix is None:
+            # 默认使用用户主目录作为敏感前缀
+            prefix_path = Path.home().resolve()
+        else:
+            prefix_path = Path(sensitive_prefix).resolve()
+            
+        # 2. 规范化输入路径
+        input_path = Path(file_path).resolve()
+
+        # 3. 检查输入路径是否以敏感前缀开始
+        if input_path.is_relative_to(prefix_path):
+            # is_relative_to() 是 Python 3.9+ 的方法，判断路径是否在另一个路径下。
+            
+            # 计算剩余部分（即去掉前缀后的路径）
+            try:
+                # relative_to 会返回去掉前缀后的路径对象
+                relative_part = input_path.relative_to(prefix_path)
+            except ValueError:
+                # 如果路径完全等于前缀，relative_to 会抛出 ValueError，此时相对部分为空
+                relative_part = Path("")
+
+            # 4. 组合脱敏后的路径
+            # Windows/Linux 都会正确处理路径分隔符
+            return f"{replacement}{os.sep}{relative_part}"
+        
+        # 如果不是敏感路径，返回原路径
+        return file_path
+        
+    except Exception as e:
+        # 如果路径无效，返回原路径
+        # print(f"Error processing path: {e}")
+        return file_path
+    
 class LogExtractor:
     """Core log extraction functionality."""
 
@@ -399,11 +440,9 @@ class LogExtractor:
         if "jarDependencies" in data and data["jarDependencies"]:
             output.append("## JAR Dependencies")
             output.append(f"- **Total JARs:** {len(data['jarDependencies'])}")
-            for jar in data["jarDependencies"][:10]:  # Show first 10
+            for jar in data["jarDependencies"]:
                 size_kb = jar.get('size', 0) / 1024
                 output.append(f"- {jar['name']} ({size_kb:.1f} KB)")
-            if len(data["jarDependencies"]) > 10:
-                output.append(f"- ... and {len(data['jarDependencies']) - 10} more JARs")
             output.append("")
 
         # Frontend Components
@@ -424,7 +463,7 @@ class LogExtractor:
             logs = data["studioProLogs"]
             output.append("## Studio Pro Logs")
             output.append(f"- **Log file exists:** {logs.get('exists', False)}")
-            output.append(f"- **Log file path:** {logs.get('logPath', 'Unknown')}")
+            output.append(f"- **Log file path:** {sanitize_path_prefix_pathlib(logs.get('logPath', 'Unknown'))}")
             output.append(f"- **Last modified:** {logs.get('lastModified', 'Unknown')}")
             output.append(f"- **Total lines:** {len(logs.get('lines', []))}")
             if logs.get("lines"):
@@ -440,7 +479,7 @@ class LogExtractor:
             git_logs = data["gitLogs"]
             output.append("## Git Logs")
             output.append(f"- **Git log file exists:** {git_logs.get('exists', False)}")
-            output.append(f"- **Log file path:** {git_logs.get('logPath', 'Unknown')}")
+            output.append(f"- **Log file path:** {sanitize_path_prefix_pathlib(git_logs.get('logPath', 'Unknown'))}")
             output.append(f"- **Last modified:** {git_logs.get('lastModified', 'Unknown')}")
             output.append(f"- **Total lines:** {len(git_logs.get('lines', []))}")
             if git_logs.get("lines"):
