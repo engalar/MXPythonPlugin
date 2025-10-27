@@ -55,7 +55,18 @@ class MendixEnvironmentService:
 
     def get_project_path(self) -> str:
         return self.app.Root.DirectoryPath
+    
+    def get_appdata_path(self) -> str:
+        """Get Windows AppData Local path."""
+        return os.environ.get('LOCALAPPDATA', '')
 
+    def get_mendix_log_path(self, version: str) -> str:
+        """Get Mendix log directory path for specific version."""
+        appdata = self.get_appdata_path()
+        if not appdata:
+            return ""
+        return os.path.join(appdata, "Mendix", "log", version)
+    
     def get_mendix_version(self) -> str:
         """Get current Mendix version from configuration."""
         try:
@@ -250,6 +261,61 @@ def sanitize_path_prefix_pathlib(file_path: str, sensitive_prefix: str = None, r
         # 如果路径无效，返回原路径
         # print(f"Error processing path: {e}")
         return file_path
+class ILogSource(ABC):
+    """Abstract representation of a log file source."""
+    @property
+    @abstractmethod
+    def id(self) -> str: ...
+    
+    @property
+    @abstractmethod
+    def name(self) -> str: ...
+    
+    @abstractmethod
+    def get_path(self, mendix_env: MendixEnvironmentService) -> str: ...
+
+class StaticLogSource(ILogSource):
+    """A concrete log source with a pre-defined path."""
+    def __init__(self, id: str, name: str, path_func: Callable[[MendixEnvironmentService], str]):
+        self._id = id
+        self._name = name
+        self._path_func = path_func
+
+    @property
+    def id(self) -> str: return self._id
+    
+    @property
+    def name(self) -> str: return self._name
+
+    def get_path(self, mendix_env: MendixEnvironmentService) -> str:
+        return self._path_func(mendix_env)
+
+class ILogSourceProvider(ABC):
+    """Abstract provider for dynamically discovering log sources."""
+    @abstractmethod
+    def get_sources(self, mendix_env: MendixEnvironmentService) -> List[ILogSource]: ...
+
+class AppLogSourceProvider(ILogSourceProvider):
+    """Discovers all *.txt log files in the project's deployment/log directory."""
+    def get_sources(self, mendix_env: MendixEnvironmentService) -> List[ILogSource]:
+        project_path = mendix_env.get_project_path()
+        log_dir = os.path.join(project_path, "deployment", "log")
+        sources = []
+        if not os.path.exists(log_dir):
+            return []
+            
+        for log_file_path in glob.glob(os.path.join(log_dir, "*.txt")):
+            base_name = os.path.basename(log_file_path)
+            # Sanitize basename to create a stable ID
+            file_id = f"app_{re.sub('[^a-zA-Z0-9_.-]', '_', base_name.lower())}"
+            
+            # Use a lambda to capture the specific path for the StaticLogSource instance
+            sources.append(StaticLogSource(
+                id=file_id, 
+                name=base_name, 
+                path_func=lambda env, p=log_file_path: p
+            ))
+        return sources
     
 class LogExtractor:
     """Core log extraction functionality."""
@@ -298,7 +364,17 @@ class LogExtractor:
             }
         except Exception as e:
             return {"lines": [f"Error reading log file: {str(e)}"], "totalLines": 0, "limit": limit, "offset": offset, "error": str(e)}
-
+        
+    def extract_log_by_path(self, file_path: str, limit: int = 100) -> dict:
+        """Extracts log data for a given file path."""
+        log_data = self.read_log_file(file_path, limit=limit)
+        return {
+            "logPath": file_path,
+            "exists": os.path.exists(file_path),
+            "lastModified": datetime.fromtimestamp(os.path.getmtime(file_path)).isoformat() if os.path.exists(file_path) else None,
+            **log_data
+        }
+    
     def extract_studio_pro_logs(self, version: str, limit: int = 100) -> dict:
         """Extract Studio Pro logs with line limit."""
         log_path = self.get_mendix_log_path(version)
@@ -405,6 +481,19 @@ class LogExtractor:
         except Exception as e:
             return [{"error": f"Failed to extract frontend components: {str(e)}"}]
 
+    def extract_app_logs(self, limit: int = 100) -> dict:
+        """Extract application runtime logs (e.g., m2ee_log.txt) with line limit."""
+        project_path = self.mendix_env.get_project_path()
+        app_log_file = os.path.join(project_path, "deployment", "log", "m2ee_log.txt")
+        log_data = self.read_log_file(app_log_file, limit=limit)
+
+        return {
+            "logPath": app_log_file,
+            "exists": os.path.exists(app_log_file),
+            "lastModified": datetime.fromtimestamp(os.path.getmtime(app_log_file)).isoformat() if os.path.exists(app_log_file) else None,
+            **log_data
+        }
+
     def format_for_forum(self, data: dict) -> str:
         """Format extracted data for comprehensive forum posting."""
         output = []
@@ -490,6 +579,22 @@ class LogExtractor:
                 output.append("```")
             output.append("")
 
+        # App logs
+        if "appLogs" in data and data["appLogs"]:
+            output.append("## Application Runtime Logs")
+            for log_id, log_content in data["appLogs"].items():
+                output.append(f"### App Log: {log_content.get('name', log_id)}")
+                output.append(f"- **Log file exists:** {log_content.get('exists', False)}")
+                output.append(f"- **Log file path:** {sanitize_path_prefix_pathlib(log_content.get('logPath', 'Unknown'))}")
+                output.append(f"- **Total lines:** {len(log_content.get('lines', []))}")
+                if log_content.get("lines"):
+                    output.append("#### Recent Entries:")
+                    output.append("```")
+                    for line in log_content["lines"]:
+                        output.append(line.strip())
+                    output.append("```")
+                output.append("")
+
         # System info
         output.append("## System Information")
         output.append(f"- **Operating System:** {os.name}")
@@ -497,7 +602,7 @@ class LogExtractor:
         output.append("")
 
         return "\n".join(output)
-
+    
 
 # ===================================================================
 # ===================   RPC HANDLERS   ==============================
@@ -530,6 +635,60 @@ class GetVersionRpc(IRpcHandler):
             "projectPath": self.mendix_env.get_project_path()
         }
 
+class ListAppLogSourcesRpc(IRpcHandler):
+    """Lists all available application log sources."""
+    command_type = "logs:listAppLogSources"
+
+    def __init__(self, app_log_provider: AppLogSourceProvider, mendix_env: MendixEnvironmentService):
+        self._provider = app_log_provider
+        self._mendix_env = mendix_env
+    
+    def execute(self, payload: dict) -> Any:
+        sources = self._provider.get_sources(self._mendix_env)
+        return [{"id": s.id, "name": s.name} for s in sources]
+
+class GetLogContentRpc(IRpcHandler):
+    """Gets the content for a specific log source by its ID."""
+    command_type = "logs:getContent"
+
+    def __init__(self, log_sources: List[ILogSource], log_extractor: LogExtractor, mendix_env: MendixEnvironmentService):
+        # We receive the provider to dynamically build the map at runtime
+        self._log_sources_provider = log_sources
+        self._log_extractor = log_extractor
+        self._mendix_env = mendix_env
+        self._source_map = None
+
+    def _ensure_map(self):
+        """Builds the source map on first use."""
+        if self._source_map is None:
+            all_sources = self._log_sources_provider
+            self._source_map = {s.id: s for s in all_sources}
+
+    def execute(self, payload: dict) -> Any:
+        self._ensure_map()
+        log_id = payload.get('id')
+        if not log_id:
+            raise ValueError("Parameter 'id' is required.")
+            
+        source = self._source_map.get(log_id)
+        if not source:
+            raise ValueError(f"Log source with id '{log_id}' not found.")
+
+        limit = payload.get('limit', 100)
+        path = source.get_path(self._mendix_env)
+        return self._log_extractor.extract_log_by_path(path, limit)
+    
+class GetAppLogsRpc(IRpcHandler):
+    """Get Application runtime logs."""
+    command_type = "logs:getAppLogs"
+
+    def __init__(self, log_extractor: LogExtractor):
+        self.log_extractor = log_extractor
+
+    def execute(self, payload: dict) -> Any:
+        limit = payload.get('limit', 100)
+        return self.log_extractor.extract_app_logs(limit=limit)
+    
 class GetStudioProLogsRpc(IRpcHandler):
     """Get Studio Pro logs."""
     command_type = "logs:getStudioProLogs"
@@ -591,16 +750,29 @@ class GenerateCompleteForumExportRpc(IRpcHandler):
     """Generate complete forum export with all log data."""
     command_type = "logs:generateCompleteForumExport"
 
-    def __init__(self, log_extractor: LogExtractor, mendix_env: MendixEnvironmentService):
+    def __init__(self,all_log_sources_provider, log_extractor: LogExtractor, mendix_env: MendixEnvironmentService):
         self.log_extractor = log_extractor
         self.mendix_env = mendix_env
+        self.all_log_sources_provider = all_log_sources_provider
 
     def execute(self, payload: dict) -> Any:
         version = self.mendix_env.get_mendix_version()
+        all_sources = self.all_log_sources_provider
 
-        # Extract all log data
-        studio_pro_logs = self.log_extractor.extract_studio_pro_logs(version)
-        git_logs = self.log_extractor.extract_git_logs(version)
+        # Extract all log data by iterating through sources
+        all_log_data = {}
+        for source in all_sources:
+             path = source.get_path(self.mendix_env)
+             all_log_data[source.id] = self.log_extractor.extract_log_by_path(path)
+
+        # Separate logs for forum formatting
+        studio_pro_log = all_log_data.get('studio_pro')
+        git_log = all_log_data.get('git')
+        app_logs = {k: v for k, v in all_log_data.items() if k.startswith('app_')}
+        for log in app_logs.values(): # Add name property for easier formatting
+            log['name'] = os.path.basename(log['logPath'])
+
+
         modules_info = self.log_extractor.extract_modules_info()
         jar_dependencies = self.log_extractor.extract_jar_dependencies()
         frontend_components = self.log_extractor.extract_frontend_components()
@@ -608,8 +780,9 @@ class GenerateCompleteForumExportRpc(IRpcHandler):
         # Combine all data
         all_data = {
             "version": version,
-            "studioProLogs": studio_pro_logs,
-            "gitLogs": git_logs,
+            "studioProLogs": studio_pro_log,
+            "gitLogs": git_log,
+            "appLogs": app_logs,
             "modules": modules_info,
             "jarDependencies": jar_dependencies,
             "frontendComponents": frontend_components
@@ -624,50 +797,6 @@ class GenerateCompleteForumExportRpc(IRpcHandler):
             "data": all_data
         }
 
-class ExtractAllLogsJob(IJobHandler):
-    """Extract all logs as a background job."""
-    command_type = "logs:extractAll"
-
-    def __init__(self, log_extractor: LogExtractor, mendix_env: MendixEnvironmentService):
-        self.log_extractor = log_extractor
-        self.mendix_env = mendix_env
-
-    def run(self, payload: dict, context: IJobContext):
-        version = self.mendix_env.get_mendix_version()
-
-        context.report_progress(ProgressUpdate(10, "Extracting Studio Pro logs...", "studio_pro"))
-        studio_pro_logs = self.log_extractor.extract_studio_pro_logs(version)
-
-        context.report_progress(ProgressUpdate(25, "Extracting Git logs...", "git"))
-        git_logs = self.log_extractor.extract_git_logs(version)
-
-        context.report_progress(ProgressUpdate(40, "Extracting modules information...", "modules"))
-        modules_info = self.log_extractor.extract_modules_info()
-
-        context.report_progress(ProgressUpdate(60, "Extracting JAR dependencies...", "jars"))
-        jar_dependencies = self.log_extractor.extract_jar_dependencies()
-
-        context.report_progress(ProgressUpdate(80, "Extracting frontend components...", "frontend"))
-        frontend_components = self.log_extractor.extract_frontend_components()
-
-        context.report_progress(ProgressUpdate(90, "Formatting data...", "formatting"))
-        all_data = {
-            "version": version,
-            "studioProLogs": studio_pro_logs,
-            "gitLogs": git_logs,
-            "modules": modules_info,
-            "jarDependencies": jar_dependencies,
-            "frontendComponents": frontend_components
-        }
-
-        formatted_forum = self.log_extractor.format_for_forum(all_data)
-
-        context.report_progress(ProgressUpdate(100, "Extraction complete!", "complete"))
-
-        return {
-            "data": all_data,
-            "forumFormatted": formatted_forum
-        }
 
 
 # endregion
@@ -697,20 +826,39 @@ class Container(containers.DeclarativeContainer):
     )
 
     log_extractor = providers.Singleton(LogExtractor, mendix_env=mendix_env)
+    studio_pro_log_source = providers.Singleton(
+        StaticLogSource,
+        id="studio_pro",
+        name="Studio Pro Log",
+        path_func=lambda env: os.path.join(env.get_mendix_log_path(env.get_mendix_version()), "log.txt")
+    )
+    git_log_source = providers.Singleton(
+        StaticLogSource,
+        id="git",
+        name="Git Log",
+        path_func=lambda env: os.path.join(env.get_mendix_log_path(env.get_mendix_version()), "git", "git.log.txt")
+    )
+    app_log_source_provider = providers.Singleton(AppLogSourceProvider)
+    # Provider that aggregates all log sources
+    all_log_sources = providers.Callable(
+        lambda studio, git, app_list: [studio, git] + app_list,
+        studio_pro_log_source,
+        git_log_source,
+        providers.Callable(lambda provider, env: provider.get_sources(env), app_log_source_provider, mendix_env),
+    )
 
     # --- Business Logic Handlers (OCP) ---
     rpc_handlers = providers.List(
         providers.Singleton(GetEnvironmentRpc, mendix_env=mendix_env),
         providers.Singleton(GetVersionRpc, mendix_env=mendix_env),
-        providers.Singleton(GetStudioProLogsRpc, log_extractor=log_extractor, mendix_env=mendix_env),
-        providers.Singleton(GetGitLogsRpc, log_extractor=log_extractor, mendix_env=mendix_env),
+        providers.Singleton(ListAppLogSourcesRpc, app_log_provider=app_log_source_provider, mendix_env=mendix_env),
+        providers.Singleton(GetLogContentRpc, log_sources=all_log_sources, log_extractor=log_extractor, mendix_env=mendix_env),
         providers.Singleton(GetModulesInfoRpc, log_extractor=log_extractor),
         providers.Singleton(GetJarDependenciesRpc, log_extractor=log_extractor),
         providers.Singleton(GetFrontendComponentsRpc, log_extractor=log_extractor),
-        providers.Singleton(GenerateCompleteForumExportRpc, log_extractor=log_extractor, mendix_env=mendix_env),
+        providers.Singleton(GenerateCompleteForumExportRpc, all_log_sources_provider=all_log_sources, log_extractor=log_extractor, mendix_env=mendix_env),
     )
     job_handlers = providers.List(
-        providers.Singleton(ExtractAllLogsJob, log_extractor=log_extractor, mendix_env=mendix_env),
     )
     session_handlers = providers.List(
     )

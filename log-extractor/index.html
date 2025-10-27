@@ -377,6 +377,7 @@
                 'Overview': 'Overview',
                 'Studio Pro Logs': 'Studio Pro Logs',
                 'Git Logs': 'Git Logs',
+                'App Logs': 'App Logs',
                 'Modules': 'Modules',
                 'Dependencies': 'Dependencies',
                 'Forum Export Tab': 'Forum Export',
@@ -387,6 +388,7 @@
                 'Overview': '概览',
                 'Studio Pro Logs': 'Studio Pro 日志',
                 'Git Logs': 'Git 日志',
+                'App Logs': '应用日志',
                 'Modules': '模块',
                 'Dependencies': '依赖项',
                 'Forum Export Tab': '论坛导出',
@@ -428,8 +430,18 @@
         };
 
         const logViewerPanelTranslations = {
-            en: { 'Lines': 'Lines', 'Log Path': 'Log Path' },
-            zh: { 'Lines': '行数', 'Log Path': '日志路径' },
+            en: {
+                'Lines': 'Lines',
+                'Log Path': 'Log Path',
+                'Select a log file': 'Select a log file',
+                'No app logs found...': 'No app logs found in deployment/log directory.'
+            },
+            zh: {
+                'Lines': '行数',
+                'Log Path': '日志路径',
+                'Select a log file': '选择一个日志文件',
+                'No app logs found...': '在 deployment/log 目录中未找到应用日志。'
+            },
         };
 
         const modulesPanelTranslations = {
@@ -591,8 +603,8 @@
 
                 // Observables for different data pieces
                 this.overviewData$ = new BehaviorSubject({ isLoading: true, data: null, error: null });
-                this.studioProLogs$ = new BehaviorSubject({ isLoading: true, data: null, error: null });
-                this.gitLogs$ = new BehaviorSubject({ isLoading: true, data: null, error: null });
+                this.appLogSources$ = new BehaviorSubject({ isLoading: true, data: [], error: null });
+                this.logContentCache$ = new BehaviorSubject(new Map());
                 this.modules$ = new BehaviorSubject({ isLoading: true, data: null, error: null });
                 this.dependencies$ = new BehaviorSubject({ isLoading: true, data: null, error: null });
                 this.frontendComponents$ = new BehaviorSubject({ isLoading: true, data: null, error: null });
@@ -609,9 +621,24 @@
                 }
             }
 
-            fetchOverview = () => this._fetchData('logs:getVersion', {}, this.overviewData$);
-            fetchStudioProLogs = (params) => this._fetchData('logs:getStudioProLogs', params, this.studioProLogs$);
-            fetchGitLogs = (params) => this._fetchData('logs:getGitLogs', params, this.gitLogs$);
+            _updateCache(logId, state) {
+                this.logContentCache$.next(
+                    new Map(this.logContentCache$.getValue()).set(logId, state)
+                );
+            }
+
+            fetchLogContent = async (logId, params) => {
+                this._updateCache(logId, { isLoading: true, data: null, error: null });
+                try {
+                    const data = await this.apiService.rpc('logs:getContent', { ...params, id: logId });
+                    this._updateCache(logId, { isLoading: false, data, error: null });
+                } catch (error) {
+                    this._updateCache(logId, { isLoading: false, data: null, error });
+                }
+            }
+
+            fetchOverview = () => this._fetchData('app:getEnvironment', {}, this.overviewData$);
+            listAppLogSources = () => this._fetchData('logs:listAppLogSources', {}, this.appLogSources$);
             fetchModules = () => this._fetchData('logs:getModulesInfo', {}, this.modules$);
             fetchJarDependencies = () => this._fetchData('logs:getJarDependencies', {}, this.dependencies$);
             fetchFrontendComponents = () => this._fetchData('logs:getFrontendComponents', {}, this.frontendComponents$);
@@ -665,24 +692,24 @@
             );
         };
 
-        const LogViewerPanel = ({ title, logType, icon }) => {
+        
+        const LogViewerPanel = ({ title, logId, icon }) => {
             const { t } = useTranslation();
             const dataService = useDependency(IDataService);
-            const dataKey = logType === 'StudioProLogs' ? 'studioProLogs$' : 'gitLogs$';
-            const fetchMethod = logType === 'StudioProLogs' ? dataService.fetchStudioProLogs : dataService.fetchGitLogs;
+            const cache = useObservable(dataService.logContentCache$, dataService.logContentCache$.getValue());
+            const { isLoading, data, error } = cache.get(logId) || { isLoading: true, data: null, error: null };
 
-            const { isLoading, data, error } = useObservable(dataService[dataKey], dataService[dataKey].getValue());
             const [lineCount, setLineCount] = useState(100);
 
             const handleRefresh = () => {
-                fetchMethod({ limit: parseInt(lineCount, 10) || 100 });
+                dataService.fetchLogContent(logId, { limit: parseInt(lineCount, 10) || 100 });
             };
 
             useEffect(() => {
-                if (dataService[dataKey].getValue().data === null) {
+                if (!cache.has(logId)) {
                     handleRefresh();
                 }
-            }, []);
+            }, [logId]);
 
             const renderLogContent = () => {
                 if (isLoading && !data) return <div className="text-gray-500 italic">Loading...</div>;
@@ -735,18 +762,68 @@
                 </div>
             );
         };
+        const AppLogsPanel = () => {
+            const { t } = useTranslation();
+            const dataService = useDependency(IDataService);
+            const { isLoading: sourcesLoading, data: sources, error: sourcesError } = useObservable(dataService.appLogSources$, dataService.appLogSources$.getValue());
+            const [selectedLogId, setSelectedLogId] = useState('');
+
+            useEffect(() => {
+                dataService.listAppLogSources();
+            }, []);
+
+            useEffect(() => {
+                // Auto-select the first log file if available and none is selected
+                if (sources && sources.length > 0 && !selectedLogId) {
+                    setSelectedLogId(sources[0].id);
+                }
+            }, [sources, selectedLogId]);
+            
+            const handleSelectionChange = (e) => {
+                const newId = e.target.value;
+                setSelectedLogId(newId);
+            };
+
+            return (
+                <div className="flex flex-col h-full">
+                    <div className="flex justify-between items-center mb-4 flex-shrink-0">
+                        <h2 className="text-xl font-bold flex items-center space-x-2">
+                            <span>🚀</span><span>{t('App Logs')}</span>
+                        </h2>
+                        {sources && sources.length > 0 && (
+                            <select 
+                                value={selectedLogId} 
+                                onChange={handleSelectionChange}
+                                className="p-2 border rounded bg-white"
+                            >
+                                <option value="" disabled>{t('Select a log file')}</option>
+                                {sources.map(source => (
+                                    <option key={source.id} value={source.id}>{source.name}</option>
+                                ))}
+                            </select>
+                        )}
+                    </div>
+                    
+                    <div className="flex-grow overflow-auto">
+                        {sourcesLoading && <div>Loading log sources...</div>}
+                        <ErrorDisplay error={sourcesError} />
+                        {sources && sources.length === 0 && !sourcesLoading && (
+                            <div className="text-gray-500 italic text-center p-4">{t('No app logs found...')}</div>
+                        )}
+
+                        {selectedLogId && (
+                           <LogViewerPanel title="" logId={selectedLogId} icon=""/>
+                        )}
+                    </div>
+                </div>
+            )
+        }
+        
         const ActionsSidebar = () => {
             const { t } = useTranslation();
-            const extractAllJob = useJob('logs:extractAll');
             const dataService = useDependency(IDataService);
             const panelService = useDependency(IPanelService);
             const { isLoading: isExporting, data: exportData, error: exportError } = useObservable(dataService.forumExport$, dataService.forumExport$.getValue());
-
-            useEffect(() => {
-                if (extractAllJob.status === 'success' && extractAllJob.data) {
-                    panelService.setExtractedData(extractAllJob.data.data);
-                }
-            }, [extractAllJob.status, extractAllJob.data]);
 
             useEffect(() => {
                 if (exportData && !isExporting && !exportError) {
@@ -1072,8 +1149,9 @@
 
             // --- Business Logic Registrations (as Panels) ---
             [IPanel, { useValue: { id: 'overview', title: '🏠 Overview', component: OverviewPanel, defaultActive: true } }],
-            [IPanel, { useValue: { id: 'studio-pro', title: '📝 Studio Pro Logs', component: () => <LogViewerPanel title="Studio Pro Logs" logType="StudioProLogs" icon="📝" />, defaultActive: true } }],
-            [IPanel, { useValue: { id: 'git', title: '🔀 Git Logs', component: () => <LogViewerPanel title="Git Logs" logType="GitLogs" icon="🔀" />, defaultActive: true } }],
+            [IPanel, { useValue: { id: 'studio-pro', title: '📝 Studio Pro Logs', component: () => <LogViewerPanel title="Studio Pro Logs" logId="studio_pro" icon="📝" />, defaultActive: true } }],
+            [IPanel, { useValue: { id: 'git', title: '🔀 Git Logs', component: () => <LogViewerPanel title="Git Logs" logId="git" icon="🔀" />, defaultActive: true } }],
+            [IPanel, { useValue: { id: 'app-logs', title: '🚀 App Logs', component: AppLogsPanel, defaultActive: true } }],
             [IPanel, { useValue: { id: 'modules', title: '📦 Modules', component: ModulesPanel, defaultActive: true } }],
             [IPanel, { useValue: { id: 'dependencies', title: '🏗️ Dependencies', component: DependenciesPanel, defaultActive: true } }],
             [IPanel, { useValue: { id: 'forum', title: '🌐 Forum Export Tab', component: ForumExportPanel, defaultActive: true } }],
