@@ -180,268 +180,369 @@ class AppController:
 # ===================================================================
 # ===============     BUSINESS LOGIC CODE     =======================
 # ===================================================================
-# This section contains your feature-specific command handlers.
-# To add a new feature, create a new class implementing ICommandHandler
-# or IAsyncCommandHandler, and register it in the Container below.
-# -------------------------------------------------------------------
 
-# region Mendix SDK Imports & Helpers for Microflow Generation
+# region Mendix SDK Imports
 import time
 from System import ValueTuple, String, Array
 from Mendix.StudioPro.ExtensionsAPI.Model import Location
-from Mendix.StudioPro.ExtensionsAPI.Model.Microflows import IMicroflow, IMicroflowParameterObject, IActionActivity, IMicroflowCallAction, IMicroflowCall, MicroflowReturnValue, IHead, IMicroflowCallParameterMapping
-from Mendix.StudioPro.ExtensionsAPI.Model.Microflows.Actions import CommitEnum, ChangeActionItemType, AggregateFunctionEnum
+from Mendix.StudioPro.ExtensionsAPI.Model.Microflows import (
+    IMicroflow, IActionActivity, IMicroflowCallAction, IMicroflowCall, 
+    MicroflowReturnValue, IHead, IMicroflowCallParameterMapping
+)
+from Mendix.StudioPro.ExtensionsAPI.Model.Microflows.Actions import (
+    CommitEnum, ChangeActionItemType, AggregateFunctionEnum
+)
 from Mendix.StudioPro.ExtensionsAPI.Model.DataTypes import DataType
 from Mendix.StudioPro.ExtensionsAPI.Model.Texts import IText
 from Mendix.StudioPro.ExtensionsAPI.Model.Enumerations import IEnumeration, IEnumerationValue
 from Mendix.StudioPro.ExtensionsAPI.Model.DomainModels import (
-    IEntity, IAttribute, IStoredValue, IAssociation, IDomainModel, AssociationType,
-    IStringAttributeType, IBooleanAttributeType, IDateTimeAttributeType, IDecimalAttributeType,
-
-    IEnumerationAttributeType, EntityAssociation
+    IEntity, IAttribute, IStoredValue, IAssociation, AssociationType,
+    IStringAttributeType, IBooleanAttributeType, IDateTimeAttributeType, 
+    IDecimalAttributeType, IEnumerationAttributeType
 )
-from Mendix.StudioPro.ExtensionsAPI.Model.Projects import IProject, IModule
-# These services are assumed to be globally available in the Mendix script environment
-# microflowService, domainModelService, microflowExpressionService, microflowActivitiesService
+from Mendix.StudioPro.ExtensionsAPI.Model.Projects import IModule
 # endregion
 
+# --- Helpers: Layout & SDK Facade ---
+
+class LayoutManager:
+    """Handles the visual positioning of elements in Studio Pro."""
+    def __init__(self, start_x=100, start_y=200, spacing_x=300):
+        self.x = start_x
+        self.y = start_y
+        self.spacing_x = spacing_x
+
+    def next_pos(self) -> Location:
+        """Returns the current location and advances the cursor."""
+        loc = Location(self.x, self.y)
+        self.x += self.spacing_x
+        return loc
+
+class MendixSdkFacade:
+    """
+    Wraps the verbose Mendix SDK calls.
+    Distinguishes between 'model' (Factory/Transaction) and 'project' (Structure).
+    """
+    def __init__(self, model, project, module_name: str, report_func):
+        self.model = model        # IModel: Creates objects, resolves names
+        self.project = project    # IProject: Holds modules
+        self.module_name = module_name
+        self.report = report_func
+        
+        # Resolve or Create Module
+        self.module = next((m for m in self.project.GetModules() if m.Name == module_name), None)
+        if not self.module:
+            self.module = self.model.Create[IModule]()
+            self.module.Name = module_name
+            self.project.AddModule(self.module)
+            self.report(f"Created module: '{module_name}'", percent_increment=5)
+
+    def ensure_enum(self, enum_name, values: list):
+        qn = f"{self.module_name}.{enum_name}"
+        existing = self.model.ToQualifiedName[IEnumeration](qn).Resolve()
+        if existing: return existing
+
+        enum = self.model.Create[IEnumeration]()
+        enum.Name = enum_name
+        for val_name in values:
+            val = self.model.Create[IEnumerationValue]()
+            val.Name = val_name
+            txt = self.model.Create[IText]()
+            txt.AddOrUpdateTranslation('en_US', val_name)
+            val.Caption = txt
+            enum.AddValue(val)
+        self.module.AddDocument(enum)
+        self.report(f"Created enumeration: {enum_name}")
+        return enum
+
+    def ensure_entity(self, name, attributes: dict, location: Location):
+        qn = f"{self.module_name}.{name}"
+        entity = self.model.ToQualifiedName[IEntity](qn).Resolve()
+        
+        if entity:
+            entity.Location = location
+            self.report(f"Repositioned existing entity '{name}'.")
+            return entity
+
+        entity = self.model.Create[IEntity]()
+        entity.Name = name
+        entity.Location = location
+        
+        for attr_name, type_creator in attributes.items():
+            attr = self.model.Create[IAttribute]()
+            attr.Name = attr_name
+            # type_creator is a callable that takes 'model' as arg
+            attr.Type = type_creator(self.model) if callable(type_creator) else type_creator
+            attr.Value = self.model.Create[IStoredValue]()
+            entity.AddAttribute(attr)
+        
+        self.module.DomainModel.AddEntity(entity)
+        self.report(f"Created entity: {name}")
+        return entity
+
+    def ensure_association(self, source: IEntity, target: IEntity, name: str, is_ref_set=False):
+        # Check existence
+        all_assocs = domainModelService.GetAllAssociations(self.model, [self.module])
+        if any(a for a in all_assocs if a.Association.Name == name):
+            return
+
+        assoc = source.AddAssociation(target)
+        assoc.Name = name
+        if is_ref_set:
+            assoc.Type = AssociationType.ReferenceSet
+        self.report(f"Created association: {name}")
+
+    def get_qualified_entity(self, name):
+        # Use self.model to resolve names
+        return self.model.ToQualifiedName[IEntity](f"{self.module_name}.{name}").Resolve()
+
+# --- Main Job Logic ---
+
 class GenerateMicroflowJob(IJobHandler):
-    """
-    A long-running job that programmatically generates a complete Mendix
-    module with a domain model and a complex microflow, based on test_mf.py.
-    """
     command_type = "microflow:generate"
 
     def __init__(self):
-        # Access the global 'currentApp' provided by the Mendix environment
+        # self._app is the IModel instance (currentApp)
         self._app = currentApp
 
     def run(self, payload: Dict, context: IJobContext):
-        # --- 1. Setup dynamic reporting within the job context ---
-        progress_state = {'percent': 0, 'stage': 'Initializing', 'logs': []}
-
-        def report(message, stage_override=None, percent_increment=2):
-            new_percent = min(progress_state['percent'] + percent_increment, 99)
-            progress_state['percent'] = new_percent
-
-            if stage_override:
-                progress_state['stage'] = stage_override
-            
-            progress_state['logs'].append(message)
-            
+        # Progress state closure
+        state = {'p': 0, 'logs': []}
+        
+        def report(msg, stage=None, percent_increment=2):
+            state['p'] = min(state['p'] + percent_increment, 99)
+            state['logs'].append(msg)
             context.report_progress(ProgressUpdate(
-                percent=new_percent,
-                message=message.replace("---", "").strip(),
-                stage=progress_state['stage'],
-                metadata={'logs': list(progress_state['logs'])}
+                percent=state['p'], 
+                message=msg.replace("---", "").strip(),
+                stage=stage or "Processing",
+                metadata={'logs': list(state['logs'])}
             ))
-            time.sleep(0.05) # Slow down for UI to keep up
+            time.sleep(0.05)
 
-        # --- 2. Adapt logic from test_mf.py to be executed within this job ---
         try:
-            run_generation_logic(self._app, self._app.Root, report)
-
-            # --- 3. Report final success ---
-            final_message = "Solution generated successfully!"
-            progress_state['logs'].append(f"--- {final_message} ---")
-            context.report_progress(ProgressUpdate(
-                percent=100, message=final_message, stage="Completed",
-                metadata={'logs': list(progress_state['logs'])}
-            ))
-            return {"status": "Completed", "module": "MyOrderModule"}
+            # Execute the business logic
+            OrderManagementGenerator(self._app, report).execute()
+            
+            report("--- Generation Complete ---", "Done", 100)
+            return {"status": "Success", "module": "MyOrderModule"}
         except Exception as e:
-            tb_string = traceback.format_exc()
-            report(f"FATAL ERROR: A problem occurred during generation.\n{tb_string}", "Error", 0)
-            raise # Re-raise to let the framework send a JOB_ERROR
+            tb = traceback.format_exc()
+            report(f"ERROR: {str(e)}", "Error", 0)
+            raise RuntimeError(f"{e}\n{tb}")
 
-def run_generation_logic(model, project, report):
+class OrderManagementGenerator:
     """
-    Contains the main, refactored logic from test_mf.py.
-    Uses the provided 'report' function for all logging and progress updates.
+    Organizes the specific business logic.
     """
-    # --- Helper: TransactionManager with integrated reporting ---
-    class TransactionManager:
-        def __init__(self, app, transaction_name):
-            self.app, self.name, self.transaction = app, transaction_name, None
-        def __enter__(self):
-            self.transaction = self.app.StartTransaction(self.name)
-            report(f"Transaction '{self.name}' started.", percent_increment=5)
-            return self.transaction
-        def __exit__(self, exc_type, exc_val, exc_tb):
-            if self.transaction:
-                if exc_type is None:
-                    self.transaction.Commit()
-                    report(f"Transaction '{self.name}' committed successfully.")
-                else:
-                    self.transaction.Rollback()
-                    report(f"Transaction '{self.name}' rolled back due to error: {exc_val}")
-                self.transaction.Dispose()
-            return False
+    MODULE = "MyOrderModule"
 
-    # --- Start of adapted logic ---
-    MODULE_NAME = 'MyOrderModule'
-    
-    with TransactionManager(model, "Generate Order Management Solution"):
-        # STEP 1: Setup Environment
-        report("--- Task: Setup Order Management Environment ---", "Setup")
-        
-        # Ensure Module
-        module = next((m for m in project.GetModules() if m.Name == MODULE_NAME), None)
-        if not module:
-            module = model.Create[IModule]()
-            module.Name = MODULE_NAME
-            project.AddModule(module)
-            report(f"Created module: '{MODULE_NAME}'", percent_increment=10)
-        else:
-            report(f"Module '{MODULE_NAME}' already exists.")
+    def __init__(self, app, report_func):
+        self.model = app           # IModel (Factory, Transaction)
+        self.project = app.Root    # IProject (Structure)
+        self.report = report_func
+        self.builder = None 
+        self.layout = LayoutManager()
+
+    def execute(self):
+        # Transaction is started on the IModel
+        transaction = self.model.StartTransaction("Generate Order Solution")
+        try:
+            # Pass both model and project to the facade
+            self.builder = MendixSdkFacade(self.model, self.project, self.MODULE, self.report)
             
-        domain_model = module.DomainModel
-
-        # Create Enum 'OrderStatus'
-        enum_qn = f"{MODULE_NAME}.OrderStatus"
-        if not model.ToQualifiedName[IEnumeration](enum_qn).Resolve():
-            enum = model.Create[IEnumeration]()
-            enum.Name = "OrderStatus"
-            for val_name in ["Pending", "Confirmed", "Shipped", "Cancelled"]:
-                val = model.Create[IEnumerationValue](); val.Name = val_name
-                txt = model.Create[IText](); txt.AddOrUpdateTranslation('en_US', val_name)
-                val.Caption = txt; enum.AddValue(val)
-            module.AddDocument(enum)
-            report("Created enumeration: OrderStatus")
+            self.step_domain_model()
+            self.step_sub_microflows()
+            self.step_main_microflow()
             
-        # --- MODIFICATION START: Using correct Location API ---
-        # Helper to create entities with positioning
-        def _ensure_entity(name, attrs, location_coords: tuple[int, int]):
-            qn = f"{MODULE_NAME}.{name}"
-            entity = model.ToQualifiedName[IEntity](qn).Resolve()
-            loc = Location(location_coords[0], location_coords[1])
+            transaction.Commit()
+            self.report("Transaction committed successfully.")
+        except Exception:
+            transaction.Rollback()
+            raise
+        finally:
+            transaction.Dispose()
+
+    def step_domain_model(self):
+        self.report("--- Building Domain Model ---", "Domain Model", 10)
+        
+        # 1. Enum
+        enum = self.builder.ensure_enum("OrderStatus", ["Pending", "Confirmed", "Shipped", "Cancelled"])
+        
+        # Helper for Enum Attribute Type
+        def enum_type_creator(m):
+            t = m.Create[IEnumerationAttributeType]()
+            # [FIXED]: Assign the QualifiedName property directly.
+            # enum.QualifiedName IS ALREADY the IQualifiedName object required here.
+            # Do NOT wrap it in m.ToQualifiedName().
+            t.Enumeration = enum.QualifiedName
+            return t
+
+        # 2. Entities (using Layout Manager)
+        # We pass lambdas so the Facade uses the correct 'model' to Create types
+        self.builder.ensure_entity("Customer", 
+            {"Name": lambda m: m.Create[IStringAttributeType]()}, 
+            self.layout.next_pos())
+
+        self.builder.ensure_entity("Order", 
+            {"Description": lambda m: m.Create[IStringAttributeType](), "Status": enum_type_creator}, 
+            self.layout.next_pos())
             
-            if entity:
-                # If entity exists, just update its location for a consistent layout
-                entity.Location = loc
-                report(f"Found entity '{name}', repositioned to {location_coords}.")
-                return
+        self.builder.ensure_entity("Product", 
+            {"Price": lambda m: m.Create[IDecimalAttributeType]()}, 
+            self.layout.next_pos())
 
-            entity = model.Create[IEntity]()
-            entity.Name = name
-            entity.Location = loc # Set visual location using the correct API
-            for attr_name, attr_type_creator in attrs.items():
-                attr = model.Create[IAttribute](); attr.Name = attr_name
-                attr.Type = attr_type_creator(); attr.Value = model.Create[IStoredValue]()
-                entity.AddAttribute(attr)
-            domain_model.AddEntity(entity)
-            report(f"Created entity: {name} at position {location_coords}")
+        # 3. Associations
+        cust = self.builder.get_qualified_entity("Customer")
+        order = self.builder.get_qualified_entity("Order")
+        prod = self.builder.get_qualified_entity("Product")
+
+        self.builder.ensure_association(cust, order, "Customer_Order")
+        self.builder.ensure_association(order, prod, "Order_Product", is_ref_set=True)
         
-        # Define layout constants for the domain model
-        START_X, START_Y = 100, 200
-        ENTITY_SPACING_X = 300
+    def step_sub_microflows(self):
+        mf_name = "SUB_CheckInventory"
+        # Resolution uses IModel
+        if self.model.ToQualifiedName[IMicroflow](f"{self.MODULE}.{mf_name}").Resolve():
+            return
 
-        # Create Entities with defined positions for a clean layout
-        _ensure_entity("Customer", {"Name": model.Create[IStringAttributeType]}, (START_X, START_Y))
-        def _create_enum_type():
-            et = model.Create[IEnumerationAttributeType]()
-            et.Enumeration = model.ToQualifiedName[IEnumeration](enum_qn)
-            return et
-        _ensure_entity("Order", {"Description": model.Create[IStringAttributeType], "Status": _create_enum_type}, (START_X + ENTITY_SPACING_X, START_Y))
-        _ensure_entity("Product", {"Price": model.Create[IDecimalAttributeType]}, (START_X + 2 * ENTITY_SPACING_X, START_Y))
-        # --- MODIFICATION END ---
-
-        customer_entity = model.ToQualifiedName[IEntity](f"{MODULE_NAME}.Customer").Resolve()
-        order_entity = model.ToQualifiedName[IEntity](f"{MODULE_NAME}.Order").Resolve()
-        product_entity = model.ToQualifiedName[IEntity](f"{MODULE_NAME}.Product").Resolve()
-
-        # Create Associations
-        all_assocs = domainModelService.GetAllAssociations(model, [module])
-        if not any(a for a in all_assocs if a.Association.Name == "Customer_Order"):
-            customer_entity.AddAssociation(order_entity).Name = "Customer_Order"
-            report("Created association: Customer_Order")
-        if not any(a for a in all_assocs if a.Association.Name == "Order_Product"):
-            assoc = order_entity.AddAssociation(product_entity)
-            assoc.Name = "Order_Product"; assoc.Type = AssociationType.ReferenceSet
-            report("Created association: Order_Product")
+        self.report(f"Creating {mf_name}...", "Microflows")
         
-        # Create Sub-Microflow with diverse parameters
-        sub_mf_name = "SUB_CheckInventory"
-        sub_mf_qn = f"{MODULE_NAME}.{sub_mf_name}"
-        if not model.ToQualifiedName[IMicroflow](sub_mf_qn).Resolve():
-            params = [
-                ValueTuple.Create[String, DataType]("StringParam", DataType.String),
-                ValueTuple.Create[String, DataType]("IntegerParam", DataType.Integer),
-                ValueTuple.Create[String, DataType]("ProductParam", DataType.Object(product_entity.QualifiedName)),
-                ValueTuple.Create[String, DataType]("StatusParam", DataType.Enumeration(model.ToQualifiedName[IEnumeration](enum_qn))),
-                ValueTuple.Create[String, DataType]("ProductListParam", DataType.List(product_entity.QualifiedName)),
-            ]
-            microflowService.CreateMicroflow(
-                model, module, sub_mf_name, 
-                MicroflowReturnValue(DataType.Boolean, microflowExpressionService.CreateFromString("true")), 
-                Array[ValueTuple[String, DataType]](params)
-            )
-            report(f"Created sub-microflow: {sub_mf_name}")
-
-        report("--- Environment Setup Complete ---", "Building Microflow", percent_increment=15)
+        # [FIX]: Convert strings to IQualifiedName objects first
+        prod_qn_str = f"{self.MODULE}.Product"
+        enum_qn_str = f"{self.MODULE}.OrderStatus"
         
-        # STEP 2: Create Main Microflow
+        # 1. Create QualifiedName for Entity (Required for DataType.Object/List)
+        prod_qn = self.model.ToQualifiedName[IEntity](prod_qn_str)
+        
+        # 2. Create QualifiedName for Enumeration (Required for DataType.Enumeration)
+        # Note: Do NOT call .Resolve() here. DataType expects the name reference, not the object.
+        enum_qn = self.model.ToQualifiedName[IEnumeration](enum_qn_str)
+        
+        # Create Types using the QualifiedName objects
+        params = [
+            ValueTuple.Create[String, DataType]("StringParam", DataType.String),
+            ValueTuple.Create[String, DataType]("IntegerParam", DataType.Integer),
+            
+            # Pass the QualifiedName object, NOT the string
+            ValueTuple.Create[String, DataType]("ProductParam", DataType.Object(prod_qn)),
+            
+            # Pass the QualifiedName object
+            ValueTuple.Create[String, DataType]("StatusParam", DataType.Enumeration(enum_qn)),
+            
+            # Pass the QualifiedName object
+            ValueTuple.Create[String, DataType]("ProductListParam", DataType.List(prod_qn)),
+        ]
+        
+        microflowService.CreateMicroflow(
+            self.model, self.builder.module, mf_name, 
+            MicroflowReturnValue(DataType.Boolean, microflowExpressionService.CreateFromString("true")), 
+            Array[ValueTuple[String, DataType]](params)
+        )
+        
+    def step_main_microflow(self):
         mf_name = "ACT_ProcessPendingOrder"
-        if not model.ToQualifiedName[IMicroflow](f"{MODULE_NAME}.{mf_name}").Resolve():
-            report(f"--- Task: Create Microflow '{mf_name}' ---", "Building Microflow")
-            all_assocs = domainModelService.GetAllAssociations(model, [module]) # Re-fetch
-            customer_order_assoc = next(a for a in all_assocs if a.Association.Name == 'Customer_Order')
-            order_product_assoc = next(a for a in all_assocs if a.Association.Name == 'Order_Product')
-            sub_mf = model.ToQualifiedName[IMicroflow](sub_mf_qn).Resolve()
-            desc_attr = next(a for a in order_entity.GetAttributes() if a.Name == "Description")
-            status_attr = next(a for a in order_entity.GetAttributes() if a.Name == "Status")
+        if self.model.ToQualifiedName[IMicroflow](f"{self.MODULE}.{mf_name}").Resolve():
+            self.report(f"Microflow {mf_name} already exists.")
+            return
 
-            mf = microflowService.CreateMicroflow(
-                model, module, mf_name, MicroflowReturnValue(DataType.Boolean, microflowExpressionService.CreateFromString("true")), 
-                ValueTuple.Create[String, DataType]('PendingOrder', DataType.Object(order_entity.QualifiedName))
-            )
-            report(f"Created microflow shell: {mf_name}")
-            
-            # Helper to create Microflow Call Activity
-            def createMicroflowCallActivity(sub_mf, mappings, out_var):
-                act = model.Create[IActionActivity]()
-                call_action = model.Create[IMicroflowCallAction](); act.Action = call_action
-                call_action.OutputVariableName = out_var
-                mf_call = model.Create[IMicroflowCall](); mf_call.Microflow = sub_mf.QualifiedName
-                call_action.MicroflowCall = mf_call
-                
-                target_params = {p.Name: p for p in microflowService.GetParameters(sub_mf)}
-                for m in mappings:
-                    param_name, arg_expr = m.Item1, m.Item2
-                    mapping = model.Create[IMicroflowCallParameterMapping]()
-                    mapping.Parameter = target_params[param_name].QualifiedName
-                    mapping.Argument = microflowExpressionService.CreateFromString(arg_expr)
-                    mf_call.AddParameterMapping(mapping)
-                return act
+        self.report(f"--- Building Main Microflow: {mf_name} ---", "Microflows")
+        
+        # Resolve dependencies
+        order_ent = self.builder.get_qualified_entity("Order")
+        sub_mf = self.model.ToQualifiedName[IMicroflow](f"{self.MODULE}.SUB_CheckInventory").Resolve()
+        
+        # Create Shell
+        mf = microflowService.CreateMicroflow(
+            self.model, self.builder.module, mf_name, 
+            MicroflowReturnValue(DataType.Boolean, microflowExpressionService.CreateFromString("true")), 
+            ValueTuple.Create[String, DataType]('PendingOrder', DataType.Object(order_ent.QualifiedName))
+        )
 
-            # Define activities
-            activities = [
-                microflowActivitiesService.CreateAssociationRetrieveSourceActivity(model, customer_order_assoc.Association, "RetrievedCustomer", "PendingOrder"),
-                microflowActivitiesService.CreateAssociationRetrieveSourceActivity(model, order_product_assoc.Association, "RetrievedProductList", "PendingOrder"),
-                microflowActivitiesService.CreateListOperationActivity(model, "RetrievedProductList", "FirstProduct", model.Create[IHead]()),
-                createMicroflowCallActivity(sub_mf, [
-                    ValueTuple.Create("StringParam", "'Sample Text'"),
-                    ValueTuple.Create("IntegerParam", "42"),
-                    ValueTuple.Create("ProductParam", "$FirstProduct"),
-                    ValueTuple.Create("StatusParam", f"{MODULE_NAME}.OrderStatus.Pending"),
-                    ValueTuple.Create("ProductListParam", "$RetrievedProductList"),
-                ], "InventoryCheckResult"),
-                microflowActivitiesService.CreateAggregateListActivity(model, "RetrievedProductList", "ProductCount", AggregateFunctionEnum.Count),
-                microflowActivitiesService.CreateChangeAttributeActivity(model, desc_attr, ChangeActionItemType.Set, microflowExpressionService.CreateFromString("'Processed with ' + toString($ProductCount) + ' items.'"), "PendingOrder", CommitEnum.No),
-                microflowActivitiesService.CreateChangeAttributeActivity(model, status_attr, ChangeActionItemType.Set, microflowExpressionService.CreateFromString(f"{MODULE_NAME}.OrderStatus.Confirmed"), "PendingOrder", CommitEnum.No),
-                microflowActivitiesService.CreateCommitObjectActivity(model, "PendingOrder", True, False)
-            ]
-            report(f"Defined {len(activities)} activities for the microflow.")
+        # Retrieve Association Names
+        all_assocs = domainModelService.GetAllAssociations(self.model, [self.builder.module])
+        assoc_cust_order = next(a for a in all_assocs if a.Association.Name == 'Customer_Order')
+        assoc_order_prod = next(a for a in all_assocs if a.Association.Name == 'Order_Product')
 
-            if microflowService.TryInsertAfterStart(mf, Array[IActionActivity](activities[::-1])):
-                report("Successfully inserted all activities into microflow.")
-            else:
-                raise RuntimeError("Failed to insert activities into microflow.")
-            
-            report(f"--- Success: Microflow '{mf_name}' Created ---", "Finalizing")
+        # Build Activity List
+        acts = []
+        
+        # 1. Retrieve Customer
+        acts.append(microflowActivitiesService.CreateAssociationRetrieveSourceActivity(
+            self.model, assoc_cust_order.Association, "RetrievedCustomer", "PendingOrder"
+        ))
+        
+        # 2. Retrieve Products
+        acts.append(microflowActivitiesService.CreateAssociationRetrieveSourceActivity(
+            self.model, assoc_order_prod.Association, "RetrievedProductList", "PendingOrder"
+        ))
+        
+        # 3. List Operation (Head) (Uses model.Create)
+        acts.append(microflowActivitiesService.CreateListOperationActivity(
+            self.model, "RetrievedProductList", "FirstProduct", self.model.Create[IHead]()
+        ))
 
-            
-# endregion 
+        # 4. Call Sub-Microflow
+        call_act = self.model.Create[IActionActivity]()
+        call_action = self.model.Create[IMicroflowCallAction]()
+        call_act.Action = call_action
+        call_action.OutputVariableName = "InventoryCheckResult"
+        
+        mf_call = self.model.Create[IMicroflowCall]()
+        mf_call.Microflow = sub_mf.QualifiedName
+        call_action.MicroflowCall = mf_call
+        
+        # Parameter Mapping
+        mappings = {
+            "StringParam": "'Sample Text'",
+            "IntegerParam": "42",
+            "ProductParam": "$FirstProduct",
+            "StatusParam": f"{self.MODULE}.OrderStatus.Pending",
+            "ProductListParam": "$RetrievedProductList"
+        }
+        target_params = {p.Name: p for p in microflowService.GetParameters(sub_mf)}
+        
+        for p_name, expr in mappings.items():
+            mapping = self.model.Create[IMicroflowCallParameterMapping]()
+            mapping.Parameter = target_params[p_name].QualifiedName
+            mapping.Argument = microflowExpressionService.CreateFromString(expr)
+            mf_call.AddParameterMapping(mapping)
+        
+        acts.append(call_act)
+
+        # 5. Aggregate List
+        acts.append(microflowActivitiesService.CreateAggregateListActivity(
+            self.model, "RetrievedProductList", "ProductCount", AggregateFunctionEnum.Count
+        ))
+
+        # 6. Change Order
+        desc_attr = next(a for a in order_ent.GetAttributes() if a.Name == "Description")
+        status_attr = next(a for a in order_ent.GetAttributes() if a.Name == "Status")
+        
+        acts.append(microflowActivitiesService.CreateChangeAttributeActivity(
+            self.model, desc_attr, ChangeActionItemType.Set, 
+            microflowExpressionService.CreateFromString("'Processed ' + toString($ProductCount) + ' items.'"), 
+            "PendingOrder", CommitEnum.No
+        ))
+        
+        acts.append(microflowActivitiesService.CreateChangeAttributeActivity(
+            self.model, status_attr, ChangeActionItemType.Set, 
+            microflowExpressionService.CreateFromString(f"{self.MODULE}.OrderStatus.Confirmed"), 
+            "PendingOrder", CommitEnum.No
+        ))
+
+        # 7. Commit
+        acts.append(microflowActivitiesService.CreateCommitObjectActivity(
+            self.model, "PendingOrder", True, False
+        ))
+
+        # Insert all at once
+        if microflowService.TryInsertAfterStart(mf, Array[IActionActivity](acts[::-1])):
+            self.report(f"Successfully added {len(acts)} activities.")
+        else:
+            raise RuntimeError("Failed to generate microflow logic.")
+
+# endregion
 
 # region IOC & APP INITIALIZATION
 # ===================================================================
