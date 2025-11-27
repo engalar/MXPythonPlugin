@@ -6,24 +6,55 @@
   <title>Mendix Project Explorer</title>
   <script src="assets/tailwindcss.js"></script>
   <style>
-    body { overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
-    
+    body {
+      overflow: hidden;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+
     /* Custom Scrollbar */
-    ::-webkit-scrollbar { width: 8px; height: 8px; }
-    ::-webkit-scrollbar-track { background: transparent; }
-    ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
-    ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+    ::-webkit-scrollbar {
+      width: 8px;
+      height: 8px;
+    }
+
+    ::-webkit-scrollbar-track {
+      background: transparent;
+    }
+
+    ::-webkit-scrollbar-thumb {
+      background: #cbd5e1;
+      border-radius: 4px;
+    }
+
+    ::-webkit-scrollbar-thumb:hover {
+      background: #94a3b8;
+    }
 
     /* Split Pane Resizer */
     .resizer {
-      width: 4px; cursor: col-resize; background: #e2e8f0; transition: background 0.2s;
-      position: relative; z-index: 10;
+      width: 4px;
+      cursor: col-resize;
+      background: #e2e8f0;
+      transition: background 0.2s;
+      position: relative;
+      z-index: 10;
     }
-    .resizer:hover, .resizer:active { background: #3b82f6; }
-    
+
+    .resizer:hover,
+    .resizer:active {
+      background: #3b82f6;
+    }
+
     /* Utilities */
-    .select-none { user-select: none; }
-    .icon-sm { width: 16px; height: 16px; display: inline-block; }
+    .select-none {
+      user-select: none;
+    }
+
+    .icon-sm {
+      width: 16px;
+      height: 16px;
+      display: inline-block;
+    }
   </style>
 </head>
 
@@ -36,7 +67,7 @@
 
   <script type="text/babel">
     const { React, ReactDOM, rxjs } = globalThis.__tmp;
-    const { useState, useEffect, useContext, createContext, useMemo, useRef } = React;
+    const { useState, useEffect, useContext, createContext, useMemo, useRef, useCallback } = React;
 
     // ===========================================
     // 1. RPC & STATE
@@ -53,7 +84,7 @@
       handleMessage(ev) {
         if (ev.data?.type === 'backend:info') return console.log("[Backend]", ev.data.data);
         if (ev.data?.type !== 'backendResponse') return;
-        
+
         try {
           const payload = typeof ev.data.data === 'string' ? JSON.parse(ev.data.data) : ev.data.data;
           if (this.pending.has(payload.requestId)) {
@@ -68,22 +99,26 @@
         return new Promise((resolve, reject) => {
           this.pending.set(id, { resolve, reject });
           window.parent.sendMessage("frontend:message", { jsonrpc: "2.0", method, params, id });
-          setTimeout(() => { 
-            if(this.pending.has(id)) { this.pending.delete(id); reject("Timeout"); }
+          setTimeout(() => {
+            if (this.pending.has(id)) { this.pending.delete(id); reject("Timeout"); }
           }, 5000);
         });
       }
     }
 
+    // [AppProvider]
     const AppProvider = ({ children }) => {
       const rpc = useMemo(() => new RpcClient(), []);
       const [selectedId, setSelectedId] = useState(null);
+      const [selectedPath, setSelectedPath] = useState(""); // 新增：存储树路径
       const [details, setDetails] = useState(null);
       const [loadingDetails, setLoadingDetails] = useState(false);
 
-      const selectNode = async (id) => {
+      // 修改 selectNode，接收 path 参数
+      const selectNode = useCallback(async (id, path) => {
         if (selectedId === id) return;
         setSelectedId(id);
+        setSelectedPath(path); // 保存路径
         setLoadingDetails(true);
         setDetails(null);
         try {
@@ -94,10 +129,11 @@
         } finally {
           setLoadingDetails(false);
         }
-      };
+      }, [selectedId, rpc]);
 
+      // 暴露 selectedPath
       return (
-        <AppContext.Provider value={{ rpc, selectedId, selectNode, details, loadingDetails }}>
+        <AppContext.Provider value={{ rpc, selectedId, selectedPath, selectNode, details, loadingDetails }}>
           {children}
         </AppContext.Provider>
       );
@@ -129,18 +165,25 @@
     // ===========================================
     // 3. TREE VIEW
     // ===========================================
-    const TreeItem = ({ node, level = 0 }) => {
+    // [TreeItem]
+    // 增加 parentPath 参数
+    const TreeItem = ({ node, level = 0, parentPath = '' }) => {
       const { rpc, selectedId, selectNode } = useContext(AppContext);
       const [expanded, setExpanded] = useState(false);
       const [children, setChildren] = useState([]);
       const [loading, setLoading] = useState(false);
 
       const isSelected = selectedId === node.id;
-      
+
+      // === 核心逻辑：构建当前节点路径 ===
+      // 如果没有父路径，当前就是根（如 MyModule）
+      // 如果有父路径，拼接 "/name"
+      const currentPath = parentPath ? `${parentPath}/${node.name}` : node.name;
+
       const handleToggle = async (e) => {
         e.stopPropagation();
         if (!node.hasChildren) return;
-        
+
         if (expanded) {
           setExpanded(false);
         } else {
@@ -150,31 +193,28 @@
             try {
               const res = await rpc.call('get_children', { parent_id: node.id });
               setChildren(res);
-            } catch (err) { console.error(err); } 
+            } catch (err) { console.error(err); }
             finally { setLoading(false); }
           }
         }
       };
 
-      const handleSelect = () => {
-        // Only select Files (Units), allow folders to just toggle
-        // or select both. Let's select both so user sees details.
-        selectNode(node.id);
-      };
+      const handleSelect = useCallback(() => {
+        // 点击时，将计算好的 currentPath 传给全局状态
+        selectNode(node.id, currentPath);
+      }, [selectNode, node.id, currentPath]);
 
       return (
         <div className="select-none">
-          <div 
+          <div
             className={`flex items-center py-0.5 pr-2 cursor-pointer hover:bg-gray-100 ${isSelected ? 'bg-blue-100' : ''}`}
             style={{ paddingLeft: `${level * 12 + 4}px` }}
             onClick={handleSelect}
           >
-            {/* Toggle Button */}
             <div onClick={handleToggle} className="w-5 h-5 flex items-center justify-center mr-0.5 hover:bg-gray-200 rounded">
-              {loading ? <Icons.Spinner /> : (node.hasChildren ? (expanded ? <Icons.ChevronD/> : <Icons.ChevronR/>) : null)}
+              {loading ? <Icons.Spinner /> : (node.hasChildren ? (expanded ? <Icons.ChevronD /> : <Icons.ChevronR />) : null)}
             </div>
-            
-            {/* Icon & Name */}
+
             <div className="flex items-center space-x-2 truncate">
               <NodeIcon category={node.category} expanded={expanded} />
               <span className={`truncate ${node.category === 'file' ? 'text-gray-700 font-medium' : 'text-gray-600'}`}>
@@ -182,16 +222,16 @@
               </span>
             </div>
           </div>
-          
+
           {expanded && (
             <div>
-              {children.map(c => <TreeItem key={c.id} node={c} level={level + 1} />)}
+              {/* 递归：将 currentPath 作为子节点的 parentPath */}
+              {children.map(c => <TreeItem key={c.id} node={c} level={level + 1} parentPath={currentPath} />)}
             </div>
           )}
         </div>
       );
     };
-
     const Sidebar = () => {
       const { rpc } = useContext(AppContext);
       const [roots, setRoots] = useState([]);
@@ -214,7 +254,7 @@
     const Breadcrumbs = ({ history, cursor, onNavigate }) => {
       // 生成完整路径字符串用于复制
       const fullPathString = history.slice(0, cursor + 1).map(h => h.segment).join('');
-      
+
       const copyPath = (e) => {
         e.stopPropagation();
         navigator.clipboard.writeText(fullPathString || '/');
@@ -227,25 +267,24 @@
       return (
         <div className="flex items-center text-xs text-gray-500 bg-gray-50 border-b px-2 py-2">
           <div className="flex-grow flex flex-wrap items-center">
-             {history.map((item, index) => {
-               const isActive = index === cursor;
-               const isFuture = index > cursor; // 处于 Peek 状态的“未来”路径
-               return (
-                 <div key={index} className={`flex items-center ${isFuture ? 'opacity-40 grayscale' : ''}`}>
-                   <span 
-                     className={`cursor-pointer hover:bg-gray-200 px-1 rounded transition-colors ${isActive ? 'font-bold text-gray-800' : 'text-blue-600'}`}
-                     onClick={() => onNavigate(index)}
-                     title={item.name}
-                   >
-                     {/* 根节点显示 Name，后续节点显示 segment (JSON Path) */}
-                     {index === 0 ? item.name : item.segment}
-                   </span>
-                 </div>
-               );
-             })}
+            {history.map((item, index) => {
+              const isActive = index === cursor;
+              const isFuture = index > cursor; // 处于 Peek 状态的“未来”路径
+              return (
+                <div key={index} className={`flex items-center ${isFuture ? 'opacity-40 grayscale' : ''}`}>
+                  <span
+                    className={`cursor-pointer hover:bg-gray-200 px-1 rounded transition-colors ${isActive ? 'font-bold text-gray-800' : 'text-blue-600'}`}
+                    onClick={() => onNavigate(index)}
+                    title={item.name}
+                  >
+                    {item.segment}
+                  </span>
+                </div>
+              );
+            })}
           </div>
           <button onClick={copyPath} title="Copy Path" className="ml-2 p-1 hover:bg-gray-200 rounded text-gray-400">
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2"/></svg>
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" /></svg>
           </button>
         </div>
       );
@@ -253,12 +292,12 @@
 
     // [替换组件：Inspector (支持 Grouped Elements 和 History Cursor)]
     const Inspector = () => {
-      const { rpc, selectedId, loadingDetails } = useContext(AppContext);
-      
+      const { rpc, selectedId, selectedPath, loadingDetails } = useContext(AppContext);
+
       // State: 历史记录 [{ id, name, segment }] 和 当前指针
       const [history, setHistory] = useState([]);
       const [cursor, setCursor] = useState(-1);
-      
+
       const [currentData, setCurrentData] = useState(null);
       const [loading, setLoading] = useState(false);
       const [activeTab, setActiveTab] = useState('props');
@@ -266,34 +305,39 @@
       // 根节点切换时重置
       useEffect(() => {
         if (selectedId) {
-          // 初始化加载，先获取基本信息，segment 设为 "/"
+          // 初始化加载
           setHistory([]);
           setCursor(-1);
-          // 模拟一次 Drill 以加载 Root
+          // 这里的 selectedId 和 selectedPath 都是最新的
           loadNodeAndPush(selectedId, "Root", "/", true);
         } else {
           setHistory([]);
           setCursor(-1);
           setCurrentData(null);
         }
-      }, [selectedId]);
+        // 仅在 ID 或 Path 改变时重置。不要添加 loadNodeAndPush，否则 Drill 时会触发 Reset
+      }, [selectedId, selectedPath]);
 
-      const loadNodeAndPush = async (id, name, segment, reset = false) => {
+      // === 1. 包装 loadNodeAndPush，添加 selectedPath 等依赖 ===
+      const loadNodeAndPush = useCallback(async (id, name, segment, reset = false) => {
         setLoading(true);
         try {
           const res = await rpc.call('get_details', { node_id: id });
-          
+
           if (reset) {
-            setHistory([{ id: res.id, name: res.name, segment: res.name }]); // 根路径直接显示名字
+            // 这里使用了 selectedPath，必须确保它是最新的
+            const rootSegment = `${selectedPath}@`; 
+
+            setHistory([{
+              id: res.id,
+              name: res.name,
+              segment: rootSegment
+            }]);
             setCursor(0);
           } else {
-            // 逻辑：如果当前不在末尾，且新点击的不是“历史中下一步”，则切断历史
-            // 简单逻辑：只要 Drill 了，就切断 Cursor 之后的内容并追加
-            // 只有当点击的目标 ID 等于 history[cursor+1].id 时，才保留 (这是高级优化，这里先做切断以保证一致性)
-            
+            // 使用函数式更新，确保读取到最新的 cursor 和 history
+            // 注意：这里我们依赖外部的 history 状态，所以 history 必须在依赖数组中
             const nextHistory = history.slice(0, cursor + 1);
-            
-            // 检查是否已经在下一个位置（用户点击了 Peek 的路径）- 可选优化，这里简化为直接追加
             nextHistory.push({ id: res.id, name: res.name, segment });
             setHistory(nextHistory);
             setCursor(nextHistory.length - 1);
@@ -304,30 +348,32 @@
         } finally {
           setLoading(false);
         }
-      };
+      }, [rpc, selectedPath, history, cursor]); // 依赖数组关键
 
-      // 仅仅加载数据用于 Peek，不改变 History 结构
-      const loadNodeOnly = async (id) => {
+      // === 2. 包装 loadNodeOnly ===
+      const loadNodeOnly = useCallback(async (id) => {
         setLoading(true);
         try {
           const res = await rpc.call('get_details', { node_id: id });
           setCurrentData(res);
         } finally { setLoading(false); }
-      };
+      }, [rpc]);
 
-      const handleNavigate = (index) => {
+      // === 3. 包装 handleNavigate ===
+      const handleNavigate = useCallback((index) => {
         setCursor(index);
         loadNodeOnly(history[index].id);
-      };
+      }, [history, loadNodeOnly]);
 
-      const handleDrill = (id, name, segment) => {
+      // === 4. 包装 handleDrill ===
+      const handleDrill = useCallback((id, name, segment) => {
         // 检查是否点击的是“历史记录中的下一个” (Peek 恢复)
         if (cursor < history.length - 1 && history[cursor + 1].id === id) {
           handleNavigate(cursor + 1);
           return;
         }
         loadNodeAndPush(id, name, segment);
-      };
+      }, [cursor, history, handleNavigate, loadNodeAndPush]);
 
       if (!selectedId) return <div className="h-full flex items-center justify-center text-gray-400 select-none">Select an item to inspect</div>;
       if (loading || loadingDetails) return <div className="h-full flex items-center justify-center"><Icons.Spinner /></div>;
@@ -363,7 +409,7 @@
 
           {/* Content */}
           <div className="flex-grow overflow-y-auto relative bg-white p-2">
-            
+
             {/* PROPERTIES TAB */}
             {activeTab === 'props' && (
               <table className="min-w-full text-xs border-collapse">
@@ -374,19 +420,19 @@
                       <td className="py-2 px-2 font-medium text-gray-600 w-1/3 truncate" title={prop.name}>{prop.name}</td>
                       <td className="py-2 px-2 font-mono break-all">
                         {prop.refId ? (
-                            <span 
-                              onClick={() => {
-                                // JSON Path 逻辑：如果属性名是 "[x]" 格式，则不加点，否则加点
-                                const segment = prop.name.startsWith('[') ? prop.name : `.${prop.name}`;
-                                handleDrill(prop.refId, prop.value, segment);
-                              }}
-                              className="text-blue-600 hover:underline cursor-pointer flex items-center"
-                            >
-                              {prop.value}
-                              <svg className="w-3 h-3 ml-1 opacity-50 group-hover:opacity-100" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 18l6-6-6-6"/></svg>
-                            </span>
+                          <span
+                            onClick={() => {
+                              // JSON Path 逻辑：如果属性名是 "[x]" 格式，则不加点，否则加点
+                              const segment = prop.name.startsWith('[') ? prop.name : `.${prop.name}`;
+                              handleDrill(prop.refId, prop.value, segment);
+                            }}
+                            className="text-blue-600 hover:underline cursor-pointer flex items-center"
+                          >
+                            {prop.value}
+                            <svg className="w-3 h-3 ml-1 opacity-50 group-hover:opacity-100" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 18l6-6-6-6" /></svg>
+                          </span>
                         ) : (
-                            <span className={prop.metaType === 'List' ? 'text-purple-600' : 'text-gray-800'}>{prop.value}</span>
+                          <span className={prop.metaType === 'List' ? 'text-purple-600' : 'text-gray-800'}>{prop.value}</span>
                         )}
                       </td>
                     </tr>
@@ -399,19 +445,19 @@
             {activeTab === 'elements' && (
               <div className="space-y-4">
                 {!hasElements && <div className="text-gray-400 italic text-center p-4 text-xs">No internal structure</div>}
-                
+
                 {elementGroups.map(groupType => (
                   <div key={groupType}>
                     <h3 className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1 border-b pb-0.5">{groupType}</h3>
                     <div className="space-y-0.5">
                       {currentData.elements[groupType].map((el, i) => (
-                        <div 
-                          key={i} 
+                        <div
+                          key={i}
                           onClick={() => handleDrill(el.id, el.name, `/${groupType}[Name='${el.name}']`)}
                           className="flex items-center text-xs p-1.5 hover:bg-blue-50 border border-transparent hover:border-blue-100 rounded cursor-pointer group"
                         >
-                           <div className="text-gray-400 mr-2"><Icons.Cube /></div>
-                           <span className="font-medium text-gray-700 truncate group-hover:text-blue-700">{el.name}</span>
+                          <div className="text-gray-400 mr-2"><Icons.Cube /></div>
+                          <span className="font-medium text-gray-700 truncate group-hover:text-blue-700">{el.name}</span>
                         </div>
                       ))}
                     </div>
@@ -419,7 +465,7 @@
                 ))}
               </div>
             )}
-            
+
           </div>
         </div>
       );

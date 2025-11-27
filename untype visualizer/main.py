@@ -155,14 +155,36 @@ def get_children(parent_id: str):
 def get_details(node_id: str):
     target = app.get_cached(node_id)
     if not target: raise Exception("Node not found")
+
+    # === 新增逻辑：计算项目路径 (Module/Folder/Name) ===
+    path_segments = []
+    # 仅当目标是 Unit (文件/模块) 或 Element 时尝试计算路径
+    if hasattr(target, "Container"):
+        curr = target
+        while curr:
+            # 排除 Project 根节点，通常不需要显示在路径里
+            if getattr(curr, "Type", "") == "Projects$Project":
+                break
+            
+            c_name = getattr(curr, "Name", None)
+            if c_name:
+                path_segments.insert(0, c_name)
+            
+            # 向上遍历
+            try: curr = curr.Container
+            except: break
     
+    full_path = "/".join(path_segments) if path_segments else getattr(target, "Name", "Unknown")
+    # =======================================================
+
     response = {
         "id": node_id,
         "name": getattr(target, "Name", "[List]" if isinstance(target, list) or hasattr(target, "Count") else "[Element]"),
         "type": getattr(target, "Type", "List"),
+        "path": full_path, # <--- 将计算好的路径放入响应
         "category": "element",
         "properties": [],
-        "elements": {} # 修改为字典：{ "Type": [items...] }
+        "elements": {} 
     }
 
     # === 辅助函数：标准化元素信息 ===
