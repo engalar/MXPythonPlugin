@@ -3,385 +3,459 @@
 
 <head>
   <meta charset="UTF-8">
-  <title>Mendix Model Browser (RxJS Refactor)</title>
+  <title>Mendix Project Explorer</title>
   <script src="assets/tailwindcss.js"></script>
   <style>
-    .copy-icon {
-      opacity: 0.2;
-      transition: opacity 0.2s;
-      cursor: pointer;
-    }
+    body { overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+    
+    /* Custom Scrollbar */
+    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+    ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
 
-    .group-hover:hover .copy-icon,
-    .copy-icon:hover {
-      opacity: 1;
+    /* Split Pane Resizer */
+    .resizer {
+      width: 4px; cursor: col-resize; background: #e2e8f0; transition: background 0.2s;
+      position: relative; z-index: 10;
     }
-
-    .tooltip {
-      position: relative;
-      display: inline-block;
-    }
-
-    .tooltip .tooltiptext {
-      visibility: hidden;
-      width: 120px;
-      background-color: #555;
-      color: #fff;
-      text-align: center;
-      border-radius: 6px;
-      padding: 5px 0;
-      position: absolute;
-      z-index: 1;
-      bottom: 125%;
-      left: 50%;
-      margin-left: -60px;
-      opacity: 0;
-      transition: opacity 0.3s;
-    }
-
-    .tooltip .tooltiptext::after {
-      content: "";
-      position: absolute;
-      top: 100%;
-      left: 50%;
-      margin-left: -5px;
-      border-width: 5px;
-      border-style: solid;
-      border-color: #555 transparent transparent transparent;
-    }
-
-    .tooltip:hover .tooltiptext {
-      visibility: visible;
-      opacity: 1;
-    }
+    .resizer:hover, .resizer:active { background: #3b82f6; }
+    
+    /* Utilities */
+    .select-none { user-select: none; }
+    .icon-sm { width: 16px; height: 16px; display: inline-block; }
   </style>
 </head>
 
-<body class="bg-gray-100 font-sans text-sm">
-  <div id="app"></div>
+<body class="bg-white text-gray-800 h-screen w-screen flex flex-col text-sm">
+  <div id="app" class="h-full w-full"></div>
+
+  <!-- Dependencies -->
   <script src="assets/vendor-bundle.umd.js"></script>
   <script src="assets/babel.min.js"></script>
+
   <script type="text/babel">
-    const { React, ReactDOM, redi, rediReact, rxjs } = globalThis.__tmp;
-    delete globalThis.__tmp;
+    const { React, ReactDOM, rxjs } = globalThis.__tmp;
+    const { useState, useEffect, useContext, createContext, useMemo, useRef } = React;
 
-    const { Inject, Injector, Many, setDependencies, createIdentifier } = redi;
-    const { RediProvider, connectDependencies, useDependency, useInjector, useUpdateBinder } = rediReact;
-    const { useState, useEffect, useCallback, useMemo, useRef, Fragment } = React;
-    const { Subject } = rxjs; // Import Subject from RxJS
+    // ===========================================
+    // 1. RPC & STATE
+    // ===========================================
+    const AppContext = createContext();
 
-    // ===================================================================
-    // 1. SERVICES (Separated Concerns: Communication & State)
-    // ===================================================================
-
-    // 1.1. COMMUNICATION SERVICE (Concern: Backend RPC) - Unchanged
-    const IMendixRpcClient = createIdentifier('IMendixRpcClient');
-    class MendixRpcClient {
+    class RpcClient {
       constructor() {
         this.requestId = 0;
-        this.pendingRequests = new Map();
-        window.addEventListener('message', this.handleResponse);
+        this.pending = new Map();
+        this.handleMessage = this.handleMessage.bind(this);
+        window.addEventListener('message', this.handleMessage);
       }
-      handleResponse = (event) => {
-        if (event.data.type !== 'backendResponse') return;
-        const data = typeof event.data.data === 'string' ? JSON.parse(event.data.data) : event.data.data;
-        const pendingRequest = this.pendingRequests.get(data.requestId);
-        if (pendingRequest) {
-          this.pendingRequests.delete(data.requestId);
-          if (data.error) pendingRequest.reject(new Error(data.error.message || data.error));
-          else pendingRequest.resolve(data.result);
-        }
+      handleMessage(ev) {
+        if (ev.data?.type === 'backend:info') return console.log("[Backend]", ev.data.data);
+        if (ev.data?.type !== 'backendResponse') return;
+        
+        try {
+          const payload = typeof ev.data.data === 'string' ? JSON.parse(ev.data.data) : ev.data.data;
+          if (this.pending.has(payload.requestId)) {
+            const { resolve, reject } = this.pending.get(payload.requestId);
+            this.pending.delete(payload.requestId);
+            payload.error ? reject(payload.error) : resolve(payload.result);
+          }
+        } catch (e) { console.error(e); }
       }
       call(method, params = {}) {
-        const requestId = ++this.requestId;
+        const id = ++this.requestId;
         return new Promise((resolve, reject) => {
-          this.pendingRequests.set(requestId, { resolve, reject });
-          window.parent.sendMessage("frontend:message", { jsonrpc: "2.0", method, params, id: requestId });
+          this.pending.set(id, { resolve, reject });
+          window.parent.sendMessage("frontend:message", { jsonrpc: "2.0", method, params, id });
+          setTimeout(() => { 
+            if(this.pending.has(id)) { this.pending.delete(id); reject("Timeout"); }
+          }, 5000);
         });
       }
-      getNodeChildren(nodeId) { return this.call('getNodeChildren', { nodeId }); }
-      getNodeDetails(nodeId) { return this.call('getNodeDetails', { nodeId }); }
-      getPropertyChildren(propertyId) { return this.call('getPropertyChildren', { propertyId }); }
-      dispose() { window.removeEventListener('message', this.handleResponse); }
     }
 
-    // 1.2. STATE MANAGEMENT SERVICE (Concern: Application State) - Refactored with RxJS
-    class AppState {
-      // Use a private RxJS Subject to broadcast updates.
-      #update$ = new Subject();
+    const AppProvider = ({ children }) => {
+      const rpc = useMemo(() => new RpcClient(), []);
+      const [selectedId, setSelectedId] = useState(null);
+      const [details, setDetails] = useState(null);
+      const [loadingDetails, setLoadingDetails] = useState(false);
 
-      constructor(rpcClient) {
-        this.rpcClient = rpcClient;
-        this.rootNodes = [];
-        this.selectedNode = null;
-        this.isDetailsLoading = false;
-        this.loadRootNodes();
-      }
-
-      // Expose the subject as an Observable for components to subscribe to.
-      // This prevents external code from calling .next() on our subject.
-      get updates() {
-        return this.#update$.asObservable();
-      }
-
-      async loadRootNodes() {
-        this.rootNodes = await this.rpcClient.getNodeChildren('root');
-        this.#update$.next(); // Broadcast that state has changed
-      }
-
-      async selectNode(nodeInfo) {
-        if (this.selectedNode && nodeInfo.id === this.selectedNode.id) return;
-
-        this.isDetailsLoading = true;
-        this.selectedNode = { id: nodeInfo.id, path: nodeInfo.path, details: null };
-        this.#update$.next(); // Broadcast loading state change
-
+      const selectNode = async (id) => {
+        if (selectedId === id) return;
+        setSelectedId(id);
+        setLoadingDetails(true);
+        setDetails(null);
         try {
-          const details = await this.rpcClient.getNodeDetails(nodeInfo.id);
-          if (this.selectedNode && this.selectedNode.id === nodeInfo.id) {
-            this.selectedNode.details = details;
-          }
-        } catch (e) {
-          alert(`Error getting details: ${e.message}`);
-          this.selectedNode = null;
+          const res = await rpc.call('get_details', { node_id: id });
+          setDetails(res);
+        } catch (err) {
+          setDetails({ error: err.message || err });
         } finally {
-          this.isDetailsLoading = false;
-          this.#update$.next(); // Broadcast final state change
+          setLoadingDetails(false);
         }
-      }
-    }
-    setDependencies(AppState, [IMendixRpcClient]);
+      };
 
-
-    // ===================================================================
-    // 2. UI COMPONENTS (Correctly using useUpdateBinder)
-    // ===================================================================
-
-    // --- Helper Components (Largely Unchanged) ---
-    function copyToClipboard(text, tooltipRef) {
-      navigator.clipboard.writeText(text).then(() => {
-        if (tooltipRef && tooltipRef.current) {
-          const originalText = tooltipRef.current.innerText;
-          tooltipRef.current.innerText = 'Copied!';
-          setTimeout(() => { tooltipRef.current.innerText = originalText; }, 1500);
-        }
-      }).catch(err => console.error('Failed to copy: ', err));
-    }
-
-    function CopyButton({ textToCopy, tooltipText = "Copy path" }) {
-      const tooltipRef = useRef(null);
       return (
-        <div className="tooltip" onClick={(e) => { e.stopPropagation(); copyToClipboard(textToCopy, tooltipRef); }}>
-          <span className="copy-icon ml-2">
-            <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
-          </span>
-          <span className="tooltiptext" ref={tooltipRef}>{tooltipText}</span>
-        </div>
+        <AppContext.Provider value={{ rpc, selectedId, selectNode, details, loadingDetails }}>
+          {children}
+        </AppContext.Provider>
       );
-    }
+    };
 
-    function CollapsibleSection({ title, count, children, defaultOpen = false, path }) {
-      const [isOpen, setIsOpen] = useState(defaultOpen);
-      return (
-        <div className="mb-4">
-          <h3 onClick={() => setIsOpen(!isOpen)} className="group-hover font-semibold text-gray-700 border-b pb-1 mb-2 cursor-pointer flex justify-between items-center select-none">
-            <span className="flex items-center">{title} ({count}) {path && <CopyButton textToCopy={path} />}</span>
-            <span className="text-gray-500 text-xs transform transition-transform">{isOpen ? '▼' : '►'}</span>
-          </h3>
-          {isOpen && children}
-        </div>
-      );
-    }
+    // ===========================================
+    // 2. ICONS
+    // ===========================================
+    const Icons = {
+      // 文件夹/模块
+      FolderClosed: () => <svg className="icon-sm text-yellow-500 fill-current" viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>,
+      FolderOpen: () => <svg className="icon-sm text-yellow-500 fill-current" viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path><path d="M2 9h20v10H2z" fill="#FCD34D" opacity="0.5"></path></svg>,
+      // 文件 (Unit)
+      File: () => <svg className="icon-sm text-blue-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>,
+      // 内部元素 (Element)
+      Cube: () => <svg className="icon-sm text-purple-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path><polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline><line x1="12" y1="22.08" x2="12" y2="12"></line></svg>,
+      // 箭头
+      ChevronR: () => <svg className="w-4 h-4 text-gray-400" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2" fill="none"><polyline points="9 18 15 12 9 6"></polyline></svg>,
+      ChevronD: () => <svg className="w-4 h-4 text-gray-400" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2" fill="none"><polyline points="6 9 12 15 18 9"></polyline></svg>,
+      Spinner: () => <svg className="animate-spin w-4 h-4 text-blue-600" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
+    };
 
-    // --- Core Components Refactored ---
+    const NodeIcon = ({ category, expanded }) => {
+      if (category === 'folder') return expanded ? <Icons.FolderOpen /> : <Icons.FolderClosed />;
+      if (category === 'file') return <Icons.File />;
+      return <Icons.Cube />;
+    };
 
-    function PropertyNode({ node, level = 0, parentPath = '' }) {
-      const [isExpanded, setIsExpanded] = useState(false);
+    // ===========================================
+    // 3. TREE VIEW
+    // ===========================================
+    const TreeItem = ({ node, level = 0 }) => {
+      const { rpc, selectedId, selectNode } = useContext(AppContext);
+      const [expanded, setExpanded] = useState(false);
       const [children, setChildren] = useState([]);
-      const [isLoading, setIsLoading] = useState(false);
-      const rpcClient = useDependency(IMendixRpcClient); // Injected dependency
+      const [loading, setLoading] = useState(false);
 
-      const handleToggle = async () => {
+      const isSelected = selectedId === node.id;
+      
+      const handleToggle = async (e) => {
+        e.stopPropagation();
         if (!node.hasChildren) return;
-        const nextExpandedState = !isExpanded;
-        setIsExpanded(nextExpandedState);
-        if (nextExpandedState && children.length === 0) {
-          setIsLoading(true);
-          try {
-            setChildren(await rpcClient.getPropertyChildren(node.id));
-          } catch (e) {
-            alert(`Error fetching property children: ${e.message}`);
-            setIsExpanded(false);
-          } finally {
-            setIsLoading(false);
-          }
-        }
-      };
-      const currentPath = useMemo(() => node.name.startsWith('[') ? `${parentPath}${node.name}` : `${parentPath}['${node.name}']`, [parentPath, node.name]);
-
-      return (
-        <div className="border-b hover:bg-gray-50 text-xs">
-          <div className="group-hover flex items-center" style={{ paddingLeft: `${level * 16}px` }} onClick={handleToggle}>
-            <div className={`p-1 flex items-center flex-grow ${node.hasChildren ? 'cursor-pointer' : ''}`}>
-              <span className="w-5 h-5 text-center text-gray-500 mr-1 flex-shrink-0">{node.hasChildren ? (isExpanded ? '▼' : '►') : <span className="inline-block w-3"></span>}</span>
-              <span className="font-mono text-gray-600 break-all w-2/5 pr-2">{node.name}</span>
-              <span className={`break-all w-2/5 pr-2 ${node.valueType === 'ResolvableElement' ? 'italic text-purple-700' : ''}`}>{node.value}</span>
-              <span className="text-gray-500 break-all w-1/5">{node.type}</span>
-            </div>
-            <CopyButton textToCopy={currentPath} />
-          </div>
-          {isExpanded && (
-            <div>
-              {isLoading && <div style={{ paddingLeft: `${(level + 1) * 16}px` }} className="text-gray-400 italic p-1">Loading...</div>}
-              {children.map(child => <PropertyNode key={child.id} node={child} level={level + 1} parentPath={currentPath} />)}
-            </div>
-          )}
-        </div>
-      );
-    }
-
-    function InspectorPanel() {
-      const appState = useDependency(AppState);
-      // CORRECT: useUpdateBinder now receives a real RxJS Observable.
-      useUpdateBinder(appState.updates);
-
-      const { selectedNode, isDetailsLoading } = appState;
-      if (isDetailsLoading) return <div className="p-4 text-gray-500">Loading details...</div>;
-      if (!selectedNode || !selectedNode.details) return <div className="p-4 text-gray-500">Select a unit to see its details.</div>;
-
-      const { details } = selectedNode;
-      const { name, type, properties, elements } = details;
-      const groupedElements = elements.reduce((acc, el) => { (acc[el.type] = acc[el.type] || []).push(el); return acc; }, {});
-
-      return (
-        <div className="p-3 bg-white h-full overflow-y-auto">
-          <h2 className="text-lg font-bold text-gray-800 break-all">{name}</h2>
-          <p className="text-xs text-blue-600 bg-blue-100 rounded px-2 py-0.5 inline-block mb-4">{type}</p>
-          <CollapsibleSection title="Internal Elements" count={elements.length} defaultOpen={false}>
-            {elements.length > 0 ? (
-              Object.entries(groupedElements).map(([elementType, elementList]) => {
-                const groupPath = `@${elementType}`;
-                return (
-                  <CollapsibleSection key={elementType} title={elementType} count={elementList.length} path={groupPath}>
-                    {elementList.map((el) => {
-                      const hasName = el.name && !el.name.startsWith('[');
-                      const elIdentifier = hasName ? `[Name='${el.name}']` : `[${el.name.replace(/[\[\]]/g, '')}]`;
-                      return <PropertyNode key={el.id} node={el} level={1} parentPath={`${groupPath}${elIdentifier}`} />;
-                    })}
-                  </CollapsibleSection>
-                );
-              })
-            ) : <p className="text-xs text-gray-400 italic">No internal elements found.</p>}
-          </CollapsibleSection>
-          <CollapsibleSection title="Properties" count={properties.length} defaultOpen={true}>
-            {properties.length > 0 ? (
-              <div className="w-full text-left text-xs">
-                <div className="border-b border-t flex bg-gray-50 sticky top-0">
-                  <div className="font-semibold p-1 w-2/5 pl-8">Name</div>
-                  <div className="font-semibold p-1 w-2/5">Value</div>
-                  <div className="font-semibold p-1 w-1/5">Type</div>
-                </div>
-                <div>{properties.map(prop => <PropertyNode key={prop.id} node={prop} parentPath="@" />)}</div>
-              </div>
-            ) : <p className="text-xs text-gray-400 italic">No properties found.</p>}
-          </CollapsibleSection>
-        </div>
-      );
-    }
-
-    function TreeNode({ node, level = 0, parentPath = '' }) {
-      const [isExpanded, setIsExpanded] = useState(false);
-      const [children, setChildren] = useState([]);
-      const [isLoading, setIsLoading] = useState(false);
-      const rpcClient = useDependency(IMendixRpcClient);
-      const appState = useDependency(AppState);
-
-      // CORRECT: This component will now re-render when the selected node changes.
-      useUpdateBinder(appState.updates);
-
-      const { selectedNode } = appState;
-      const currentPath = useMemo(() => `${parentPath}/${node.type}[Name='${node.name}']`, [node, parentPath]);
-
-      const handleToggle = async () => {
-        const nextExpandedState = !isExpanded;
-        setIsExpanded(nextExpandedState);
-        if (nextExpandedState && children.length === 0 && node.hasChildren) {
-          setIsLoading(true);
-          try {
-            setChildren(await rpcClient.getNodeChildren(node.id));
-          } catch (e) {
-            alert(`Error fetching children: ${e.message}`);
-            setIsExpanded(false);
-          } finally {
-            setIsLoading(false);
+        
+        if (expanded) {
+          setExpanded(false);
+        } else {
+          setExpanded(true);
+          if (children.length === 0) {
+            setLoading(true);
+            try {
+              const res = await rpc.call('get_children', { parent_id: node.id });
+              setChildren(res);
+            } catch (err) { console.error(err); } 
+            finally { setLoading(false); }
           }
         }
       };
 
-      const isSelected = selectedNode?.id === node.id;
-      const handleSelect = () => appState.selectNode({ id: node.id, path: currentPath });
+      const handleSelect = () => {
+        // Only select Files (Units), allow folders to just toggle
+        // or select both. Let's select both so user sees details.
+        selectNode(node.id);
+      };
 
       return (
-        <div style={{ paddingLeft: `${level * 16}px` }}>
-          <div onClick={handleSelect} className={`group-hover flex items-center p-1 rounded cursor-pointer ${isSelected ? 'bg-blue-200' : 'hover:bg-gray-200'}`}>
-            <button onClick={(e) => { e.stopPropagation(); handleToggle(); }} className="w-5 h-5 text-center text-gray-500 mr-1 flex-shrink-0" disabled={!node.hasChildren}>
-              {node.hasChildren ? (isExpanded ? '▼' : '►') : <span className="inline-block w-2"></span>}
-            </button>
-            <div className="flex-grow overflow-hidden flex items-center">
-              <span className="font-semibold truncate">{node.name}</span>
-              <span className={`ml-2 text-xs truncate ${node.isUnit ? "text-blue-700" : "text-gray-600"}`}>({node.type})</span>
+        <div className="select-none">
+          <div 
+            className={`flex items-center py-0.5 pr-2 cursor-pointer hover:bg-gray-100 ${isSelected ? 'bg-blue-100' : ''}`}
+            style={{ paddingLeft: `${level * 12 + 4}px` }}
+            onClick={handleSelect}
+          >
+            {/* Toggle Button */}
+            <div onClick={handleToggle} className="w-5 h-5 flex items-center justify-center mr-0.5 hover:bg-gray-200 rounded">
+              {loading ? <Icons.Spinner /> : (node.hasChildren ? (expanded ? <Icons.ChevronD/> : <Icons.ChevronR/>) : null)}
             </div>
-            <CopyButton textToCopy={currentPath} />
+            
+            {/* Icon & Name */}
+            <div className="flex items-center space-x-2 truncate">
+              <NodeIcon category={node.category} expanded={expanded} />
+              <span className={`truncate ${node.category === 'file' ? 'text-gray-700 font-medium' : 'text-gray-600'}`}>
+                {node.name}
+              </span>
+            </div>
           </div>
-          {isExpanded && (
+          
+          {expanded && (
             <div>
-              {isLoading && <div style={{ paddingLeft: `16px` }} className="text-gray-400 italic">Loading...</div>}
-              {children.map(child => <TreeNode key={child.id} node={child} level={level + 1} parentPath={currentPath} />)}
+              {children.map(c => <TreeItem key={c.id} node={c} level={level + 1} />)}
             </div>
           )}
         </div>
       );
-    }
+    };
 
-    function TreeView() {
-      const appState = useDependency(AppState);
-      // CORRECT: This component will re-render when the rootNodes are loaded.
-      useUpdateBinder(appState.updates);
+    const Sidebar = () => {
+      const { rpc } = useContext(AppContext);
+      const [roots, setRoots] = useState([]);
+
+      useEffect(() => {
+        rpc.call('get_root_nodes').then(setRoots).catch(console.error);
+      }, []);
 
       return (
-        <div className="w-1/3 h-full border-r bg-white overflow-y-auto p-2">
-          <h1 className="text-xl font-bold p-2">Mendix Model Browser</h1>
-          {appState.rootNodes.map(node => (
-            <TreeNode key={node.id} node={node} parentPath="/" />
-          ))}
-        </div>
-      );
-    }
-
-    // ===================================================================
-    // 3. THE MAIN APP COMPONENT (THE "SHELL")
-    // ===================================================================
-    const App = () => {
-      return (
-        <div className="flex h-screen w-screen text-gray-800">
-          <TreeView />
-          <div className="w-2/3 h-full overflow-hidden">
-            <InspectorPanel />
+        <div className="h-full flex flex-col">
+          <div className="p-2 bg-gray-50 border-b text-xs font-bold text-gray-500 uppercase">Project Explorer</div>
+          <div className="flex-grow overflow-y-auto py-2">
+            {roots.map(n => <TreeItem key={n.id} node={n} />)}
           </div>
         </div>
       );
     };
 
-    // ===============================================================
-    // 4. IOC CONTAINER CONFIGURATION & APP ROOT
-    // ===============================================================
-    const AppWithDependencies = connectDependencies(App, [
-      [IMendixRpcClient, { useClass: MendixRpcClient }],
-      [AppState],
-    ]);
+    // [替换组件：Breadcrumbs (支持 Peek 和 JSON Path)]
+    const Breadcrumbs = ({ history, cursor, onNavigate }) => {
+      // 生成完整路径字符串用于复制
+      const fullPathString = history.slice(0, cursor + 1).map(h => h.segment).join('');
+      
+      const copyPath = (e) => {
+        e.stopPropagation();
+        navigator.clipboard.writeText(fullPathString || '/');
+        const btn = e.target.closest('button');
+        const original = btn.innerHTML;
+        btn.innerText = "OK";
+        setTimeout(() => btn.innerHTML = original, 1000);
+      };
 
+      return (
+        <div className="flex items-center text-xs text-gray-500 bg-gray-50 border-b px-2 py-2">
+          <div className="flex-grow flex flex-wrap items-center">
+             {history.map((item, index) => {
+               const isActive = index === cursor;
+               const isFuture = index > cursor; // 处于 Peek 状态的“未来”路径
+               return (
+                 <div key={index} className={`flex items-center ${isFuture ? 'opacity-40 grayscale' : ''}`}>
+                   <span 
+                     className={`cursor-pointer hover:bg-gray-200 px-1 rounded transition-colors ${isActive ? 'font-bold text-gray-800' : 'text-blue-600'}`}
+                     onClick={() => onNavigate(index)}
+                     title={item.name}
+                   >
+                     {/* 根节点显示 Name，后续节点显示 segment (JSON Path) */}
+                     {index === 0 ? item.name : item.segment}
+                   </span>
+                 </div>
+               );
+             })}
+          </div>
+          <button onClick={copyPath} title="Copy Path" className="ml-2 p-1 hover:bg-gray-200 rounded text-gray-400">
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2"/></svg>
+          </button>
+        </div>
+      );
+    };
+
+    // [替换组件：Inspector (支持 Grouped Elements 和 History Cursor)]
+    const Inspector = () => {
+      const { rpc, selectedId, loadingDetails } = useContext(AppContext);
+      
+      // State: 历史记录 [{ id, name, segment }] 和 当前指针
+      const [history, setHistory] = useState([]);
+      const [cursor, setCursor] = useState(-1);
+      
+      const [currentData, setCurrentData] = useState(null);
+      const [loading, setLoading] = useState(false);
+      const [activeTab, setActiveTab] = useState('props');
+
+      // 根节点切换时重置
+      useEffect(() => {
+        if (selectedId) {
+          // 初始化加载，先获取基本信息，segment 设为 "/"
+          setHistory([]);
+          setCursor(-1);
+          // 模拟一次 Drill 以加载 Root
+          loadNodeAndPush(selectedId, "Root", "/", true);
+        } else {
+          setHistory([]);
+          setCursor(-1);
+          setCurrentData(null);
+        }
+      }, [selectedId]);
+
+      const loadNodeAndPush = async (id, name, segment, reset = false) => {
+        setLoading(true);
+        try {
+          const res = await rpc.call('get_details', { node_id: id });
+          
+          if (reset) {
+            setHistory([{ id: res.id, name: res.name, segment: res.name }]); // 根路径直接显示名字
+            setCursor(0);
+          } else {
+            // 逻辑：如果当前不在末尾，且新点击的不是“历史中下一步”，则切断历史
+            // 简单逻辑：只要 Drill 了，就切断 Cursor 之后的内容并追加
+            // 只有当点击的目标 ID 等于 history[cursor+1].id 时，才保留 (这是高级优化，这里先做切断以保证一致性)
+            
+            const nextHistory = history.slice(0, cursor + 1);
+            
+            // 检查是否已经在下一个位置（用户点击了 Peek 的路径）- 可选优化，这里简化为直接追加
+            nextHistory.push({ id: res.id, name: res.name, segment });
+            setHistory(nextHistory);
+            setCursor(nextHistory.length - 1);
+          }
+          setCurrentData(res);
+        } catch (err) {
+          console.error(err);
+        } finally {
+          setLoading(false);
+        }
+      };
+
+      // 仅仅加载数据用于 Peek，不改变 History 结构
+      const loadNodeOnly = async (id) => {
+        setLoading(true);
+        try {
+          const res = await rpc.call('get_details', { node_id: id });
+          setCurrentData(res);
+        } finally { setLoading(false); }
+      };
+
+      const handleNavigate = (index) => {
+        setCursor(index);
+        loadNodeOnly(history[index].id);
+      };
+
+      const handleDrill = (id, name, segment) => {
+        // 检查是否点击的是“历史记录中的下一个” (Peek 恢复)
+        if (cursor < history.length - 1 && history[cursor + 1].id === id) {
+          handleNavigate(cursor + 1);
+          return;
+        }
+        loadNodeAndPush(id, name, segment);
+      };
+
+      if (!selectedId) return <div className="h-full flex items-center justify-center text-gray-400 select-none">Select an item to inspect</div>;
+      if (loading || loadingDetails) return <div className="h-full flex items-center justify-center"><Icons.Spinner /></div>;
+      if (!currentData) return null;
+
+      const elementGroups = Object.keys(currentData.elements || {});
+      const hasProps = currentData.properties && currentData.properties.length > 0;
+      const hasElements = elementGroups.length > 0;
+
+      return (
+        <div className="h-full flex flex-col bg-white">
+          {/* Header */}
+          <div className="p-3 border-b bg-white shadow-sm z-10">
+            <div className="flex items-center space-x-2">
+              <NodeIcon category={currentData.category} />
+              <h1 className="text-base font-bold text-gray-800 truncate">{currentData.name}</h1>
+              <span className="text-xs text-gray-400 font-mono border px-1 rounded">{currentData.type.split('$').pop()}</span>
+            </div>
+          </div>
+
+          {/* Breadcrumbs */}
+          <Breadcrumbs history={history} cursor={cursor} onNavigate={handleNavigate} />
+
+          {/* Tabs */}
+          <div className="flex border-b text-xs font-medium bg-gray-50 select-none">
+            <button onClick={() => setActiveTab('props')} className={`flex-1 py-2 border-b-2 ${activeTab === 'props' ? 'border-blue-500 text-blue-600 bg-white' : 'border-transparent text-gray-500'}`}>
+              Properties
+            </button>
+            <button onClick={() => setActiveTab('elements')} className={`flex-1 py-2 border-b-2 ${activeTab === 'elements' ? 'border-blue-500 text-blue-600 bg-white' : 'border-transparent text-gray-500'}`}>
+              Structure {hasElements ? `(${elementGroups.length})` : ''}
+            </button>
+          </div>
+
+          {/* Content */}
+          <div className="flex-grow overflow-y-auto relative bg-white p-2">
+            
+            {/* PROPERTIES TAB */}
+            {activeTab === 'props' && (
+              <table className="min-w-full text-xs border-collapse">
+                <tbody>
+                  {!hasProps && <tr><td className="text-gray-400 italic text-center p-4">No properties</td></tr>}
+                  {currentData.properties.map((prop, idx) => (
+                    <tr key={idx} className="border-b border-gray-100 hover:bg-blue-50 group">
+                      <td className="py-2 px-2 font-medium text-gray-600 w-1/3 truncate" title={prop.name}>{prop.name}</td>
+                      <td className="py-2 px-2 font-mono break-all">
+                        {prop.refId ? (
+                            <span 
+                              onClick={() => {
+                                // JSON Path 逻辑：如果属性名是 "[x]" 格式，则不加点，否则加点
+                                const segment = prop.name.startsWith('[') ? prop.name : `.${prop.name}`;
+                                handleDrill(prop.refId, prop.value, segment);
+                              }}
+                              className="text-blue-600 hover:underline cursor-pointer flex items-center"
+                            >
+                              {prop.value}
+                              <svg className="w-3 h-3 ml-1 opacity-50 group-hover:opacity-100" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 18l6-6-6-6"/></svg>
+                            </span>
+                        ) : (
+                            <span className={prop.metaType === 'List' ? 'text-purple-600' : 'text-gray-800'}>{prop.value}</span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+
+            {/* STRUCTURE TAB (Grouped) */}
+            {activeTab === 'elements' && (
+              <div className="space-y-4">
+                {!hasElements && <div className="text-gray-400 italic text-center p-4 text-xs">No internal structure</div>}
+                
+                {elementGroups.map(groupType => (
+                  <div key={groupType}>
+                    <h3 className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1 border-b pb-0.5">{groupType}</h3>
+                    <div className="space-y-0.5">
+                      {currentData.elements[groupType].map((el, i) => (
+                        <div 
+                          key={i} 
+                          onClick={() => handleDrill(el.id, el.name, `/${groupType}[Name='${el.name}']`)}
+                          className="flex items-center text-xs p-1.5 hover:bg-blue-50 border border-transparent hover:border-blue-100 rounded cursor-pointer group"
+                        >
+                           <div className="text-gray-400 mr-2"><Icons.Cube /></div>
+                           <span className="font-medium text-gray-700 truncate group-hover:text-blue-700">{el.name}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+            
+          </div>
+        </div>
+      );
+    };
+
+    // ===========================================
+    // 5. MAIN LAYOUT (Split Pane)
+    // ===========================================
+    const Layout = () => {
+      const [w, setW] = useState(300);
+      const dragging = useRef(false);
+
+      useEffect(() => {
+        const onMove = (e) => { if (dragging.current) setW(Math.max(200, Math.min(window.innerWidth - 200, e.clientX))); };
+        const onUp = () => dragging.current = false;
+        window.addEventListener('mousemove', onMove);
+        window.addEventListener('mouseup', onUp);
+        return () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); }
+      }, []);
+
+      return (
+        <div className="flex w-full h-full overflow-hidden">
+          <div style={{ width: w }} className="flex-shrink-0 border-r border-gray-300 bg-gray-50 flex flex-col">
+            <Sidebar />
+          </div>
+          <div className="resizer" onMouseDown={() => dragging.current = true}></div>
+          <div className="flex-grow min-w-0 bg-white">
+            <Inspector />
+          </div>
+        </div>
+      );
+    }
+
+    const App = () => <AppProvider><Layout /></AppProvider>;
     const root = ReactDOM.createRoot(document.getElementById('app'));
-    root.render(<AppWithDependencies />);
+    root.render(<App />);
   </script>
 </body>
 
