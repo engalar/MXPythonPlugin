@@ -272,6 +272,78 @@ def get_details(node_id: str):
 
     return response
 
+# ==========================================
+# [新增] 结构化元数据生成器
+# ==========================================
+class StructureExplorer:
+    @staticmethod
+    def explore(node):
+        if node is None: return None
+        
+        # 获取类型名称
+        type_name = getattr(node, "Type", type(node).__name__)
+        
+        result = {
+            "metaType": str(type_name),
+            "attributes": [],  # 普通属性 (String, Bool, Enum)
+            "children": []     # 结构化属性 (Element, List)
+        }
+
+        # 防御性编程：如果没有 GetProperties 方法（比如是基础字符串），直接返回
+        if not hasattr(node, "GetProperties"):
+            return {"metaType": "Value", "value": str(node)}
+
+        try:
+            for p in node.GetProperties():
+                p_type = str(p.Type)
+                
+                # 1. 处理结构化嵌套 (Element / ElementByName)
+                if "Element" in p_type:
+                    # 如果是列表 (List of Elements)
+                    if p.IsList:
+                        child_nodes = []
+                        # 仅取前 3 个作为样本，防止过大
+                        if p.Value: 
+                            for item in list(p.Value)[:3]:
+                                child_nodes.append(StructureExplorer.explore(item))
+                        
+                        result["children"].append({
+                            "key": p.Name,
+                            "type": "List<Element>",
+                            "data": child_nodes,
+                            "count": len(p.Value) if p.Value else 0
+                        })
+                    
+                    # 如果是单体对象 (如 microflowSettings)
+                    else:
+                        nested_data = StructureExplorer.explore(p.Value)
+                        # 只有当非空时才加入，或者标记为空
+                        result["children"].append({
+                            "key": p.Name,
+                            "type": p_type,
+                            "data": nested_data,
+                            "isEmpty": p.Value is None
+                        })
+                
+                # 2. 处理普通属性
+                else:
+                    result["attributes"].append({
+                        "key": p.Name,
+                        "type": p_type,
+                        "value": str(p.Value) if p.Value is not None else "null"
+                    })
+        except Exception as e:
+            print(f"Error exploring node: {e}")
+
+        return result
+
+# [新增路由]
+@app.route("get_structure")
+def get_structure(node_id: str):
+    target = app.get_cached(node_id)
+    if not target: raise Exception("Node not found")
+    return StructureExplorer.explore(target)
+
 # === 3. ENTRY POINT ===
 PostMessage("backend:clear", '')
 def onMessage(e: Any):

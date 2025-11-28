@@ -290,6 +290,123 @@
       );
     };
 
+    // [修正版] 统一对齐的递归树组件
+    const StructureNode = ({ data, label }) => {
+      // 默认展开
+      const [isOpen, setIsOpen] = useState(true);
+
+      if (!data) return <div className="text-gray-400 italic text-xs pl-6">{label}: (Empty)</div>;
+
+      // 如果是纯值（递归终点），显示为简单的键值对行
+      if (data.metaType === "Value") {
+        return (
+          <div className="flex items-start py-1 pl-6 hover:bg-gray-50">
+            <span className="text-purple-700 font-bold text-xs mr-2 shrink-0">{label}:</span>
+            <span className="text-gray-700 text-xs break-all">{data.value}</span>
+          </div>
+        );
+      }
+
+      // 样式常量
+      const typeBadge = "text-[10px] text-gray-400 bg-gray-100 px-1 rounded ml-2 font-mono";
+      const keyStyle = "text-gray-700 font-bold text-xs";
+      const indentStyle = "ml-4 border-l border-gray-300 pl-2"; // 统一缩进线
+
+      return (
+        <div className="my-0.5">
+          {/* 1. 节点标题行 (Header) */}
+          <div
+            className="flex items-center cursor-pointer hover:bg-gray-100 py-1 rounded select-none"
+            onClick={() => setIsOpen(!isOpen)}
+          >
+            {/* 展开/折叠箭头 (固定宽度以保证对齐) */}
+            <span className="w-5 text-center text-gray-400 text-[10px] shrink-0">
+              {isOpen ? '▼' : '▶'}
+            </span>
+
+            {/* 节点名称 (Key) */}
+            {label && <span className={keyStyle}>{label}</span>}
+
+            {/* 类型标记 (Type) */}
+            <span className={typeBadge}>{data.metaType}</span>
+
+            {/* 列表计数徽章 (可选) */}
+            {Array.isArray(data.children) && data.children.length > 0 && (
+              <span className="text-[9px] text-gray-400 ml-2">
+                {data.children.length + (data.attributes ? data.attributes.length : 0)} props
+              </span>
+            )}
+          </div>
+
+          {/* 2. 内容区域 (Content) */}
+          {isOpen && (
+            <div className={indentStyle}>
+
+              {/* A. 普通属性 (Attributes) */}
+              {data.attributes && data.attributes.map((attr, idx) => (
+                <div key={`attr-${idx}`} className="flex items-start py-0.5 hover:bg-blue-50/50 rounded-sm group">
+                  {/* 图标容器：
+                                1. w-5 保持宽度与父级箭头一致，实现左对齐
+                                2. items-center justify-center 居中图标
+                                3. mt-0.5 微调垂直位置，使其与文字基线对齐
+                            */}
+                  <span className="w-5 shrink-0 flex justify-center mt-0.5">
+                    {/* SVG 图标: 标签 (Tag) 风格 */}
+                    <svg
+                      className="w-3 h-3 text-blue-300 group-hover:text-blue-500 transition-colors"
+                      fill="none"
+                      viewBox="0 0 24 24"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                    >
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z" />
+                    </svg>
+                  </span>
+
+                  <span className="text-blue-700 font-medium text-xs mr-2 shrink-0">
+                    {attr.key}:
+                  </span>
+                  <span className="text-gray-600 text-xs break-all font-mono">
+                    {attr.value}
+                    {/* 如果不是空值，显示类型后缀 */}
+                    {attr.value !== 'null' && (
+                      <span className="text-[9px] text-gray-300 ml-1 select-none opacity-0 group-hover:opacity-100 transition-opacity">
+                        ({attr.type})
+                      </span>
+                    )}
+                  </span>
+                </div>
+              ))}
+
+              {/* B. 子结构 (Children) - 递归渲染 */}
+              {data.children && data.children.map((child, idx) => {
+                // 如果是列表 (List)
+                if (Array.isArray(child.data)) {
+                  return (
+                    <div key={`list-${idx}`}>
+                      {/* 列表标题 */}
+                      <div className="flex items-center py-1 hover:bg-gray-50">
+                        <span className="w-5 text-center text-gray-300 text-[10px]">≡</span>
+                        <span className={keyStyle}>{child.key}</span>
+                        <span className="text-[9px] bg-gray-200 text-gray-600 px-1 rounded ml-2">List [{child.count}]</span>
+                      </div>
+                      {/* 列表项内容 (缩进) */}
+                      <div className={indentStyle}>
+                        {child.data.map((item, i) => (
+                          <StructureNode key={i} data={item} label={`[${i}]`} />
+                        ))}
+                      </div>
+                    </div>
+                  );
+                }
+                // 如果是单体对象 (Object)
+                return <StructureNode key={`node-${idx}`} data={child.data} label={child.key} />;
+              })}
+            </div>
+          )}
+        </div>
+      );
+    };
     // [替换组件：Inspector (支持 Grouped Elements 和 History Cursor)]
     const Inspector = () => {
       const { rpc, selectedId, selectedPath, loadingDetails } = useContext(AppContext);
@@ -300,7 +417,14 @@
 
       const [currentData, setCurrentData] = useState(null);
       const [loading, setLoading] = useState(false);
+      const [structureData, setStructureData] = useState(null);
       const [activeTab, setActiveTab] = useState('props');
+
+      useEffect(() => {
+        if (!currentData) return;
+        setStructureData(null); // 清空旧数据
+        rpc.call('get_structure', { node_id: currentData.id }).then(setStructureData);
+      }, [currentData]);
 
       // 根节点切换时重置
       useEffect(() => {
@@ -326,7 +450,7 @@
 
           if (reset) {
             // 这里使用了 selectedPath，必须确保它是最新的
-            const rootSegment = `${selectedPath}@`; 
+            const rootSegment = `${selectedPath}@`;
 
             setHistory([{
               id: res.id,
@@ -402,6 +526,11 @@
             <button onClick={() => setActiveTab('props')} className={`flex-1 py-2 border-b-2 ${activeTab === 'props' ? 'border-blue-500 text-blue-600 bg-white' : 'border-transparent text-gray-500'}`}>
               Properties
             </button>
+            <button
+              onClick={() => setActiveTab('struct')}
+              className={`px-3 py-2 ${activeTab === 'struct' ? 'border-b-2 border-blue-500 font-bold' : ''}`}>
+              Internal Structure
+            </button>
             <button onClick={() => setActiveTab('elements')} className={`flex-1 py-2 border-b-2 ${activeTab === 'elements' ? 'border-blue-500 text-blue-600 bg-white' : 'border-transparent text-gray-500'}`}>
               Structure {hasElements ? `(${elementGroups.length})` : ''}
             </button>
@@ -464,6 +593,19 @@
                   </div>
                 ))}
               </div>
+            )}
+
+            {/* [新增] 结构视图 */}
+            {activeTab === 'struct' && (
+              structureData ? (
+                <div className="pb-10">
+                  <StructureNode data={structureData} label="Root" />
+                </div>
+              ) : (
+                <div className="p-4 text-gray-400 text-xs flex items-center">
+                  <span className="animate-spin mr-2">⟳</span> Analyzing Instance...
+                </div>
+              )
             )}
 
           </div>
