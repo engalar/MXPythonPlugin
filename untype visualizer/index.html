@@ -295,12 +295,31 @@
       // 默认展开
       const [isOpen, setIsOpen] = useState(true);
 
-      if (!data) return <div className="text-gray-400 italic text-xs pl-6">{label}: (Empty)</div>;
+      // 1. 处理空节点：显示禁止符号图标，并保持 w-5 对齐
+      if (!data) {
+        return (
+          <div className="flex items-center py-1 hover:bg-gray-50 select-none">
+            <span className="w-5 shrink-0 flex justify-center text-gray-300">
+              {/* Null/Empty Icon (Ban circle) */}
+              <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <circle cx="12" cy="12" r="10"></circle><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"></line>
+              </svg>
+            </span>
+            <span className="text-gray-400 italic text-xs">{label}: (Empty)</span>
+          </div>
+        );
+      }
 
-      // 如果是纯值（递归终点），显示为简单的键值对行
+      // 2. 处理纯值节点：显示 Hash 图标，并保持 w-5 对齐
       if (data.metaType === "Value") {
         return (
-          <div className="flex items-start py-1 pl-6 hover:bg-gray-50">
+          <div className="flex items-start py-1 hover:bg-gray-50">
+            <span className="w-5 shrink-0 flex justify-center mt-0.5 text-purple-400">
+              {/* Value Icon (Hashtag) */}
+              <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M7 20l4-16m2 16l4-16M6 9h14M4 15h14" />
+              </svg>
+            </span>
             <span className="text-purple-700 font-bold text-xs mr-2 shrink-0">{label}:</span>
             <span className="text-gray-700 text-xs break-all">{data.value}</span>
           </div>
@@ -407,7 +426,52 @@
         </div>
       );
     };
-    // [替换组件：Inspector (支持 Grouped Elements 和 History Cursor)]
+    // === 新增：YAML 转换工具 ===
+    const dataToYaml = (node, depth = 0) => {
+      if (!node) return '';
+      const indent = '  '.repeat(depth);
+
+      // 1. 纯值节点
+      if (node.metaType === 'Value') return `${node.value}\n`;
+
+      let result = '';
+
+      // 2. 属性 (Attributes)
+      if (node.attributes) {
+        node.attributes.forEach(attr => {
+          // 移除值中的换行符以免破坏 YAML 结构
+          const cleanValue = String(attr.value).replace(/\n/g, '\\n');
+          result += `${indent}${attr.key}: ${cleanValue}\n`;
+        });
+      }
+
+      // 3. 子节点 (Children)
+      if (node.children) {
+        node.children.forEach(child => {
+          if (Array.isArray(child.data)) {
+            // 列表类型
+            result += `${indent}${child.key}:\n`;
+            if (child.data.length === 0) result += `${indent}  []\n`;
+            child.data.forEach(item => {
+              // 列表项：先起一行 "- "，然后后续属性缩进对齐
+              result += `${indent}  -\n${dataToYaml(item, depth + 2)}`;
+            });
+          } else {
+            // 对象类型
+            // 如果对象为空，显示 (Empty)
+            if (!child.data) {
+              result += `${indent}${child.key}: null\n`;
+            } else if (child.data.metaType === 'Value') {
+              // 如果子节点直接是值，类似 "Name: Value"
+              result += `${indent}${child.key}: ${child.data.value}\n`;
+            } else {
+              result += `${indent}${child.key}:\n${dataToYaml(child.data, depth + 1)}`;
+            }
+          }
+        });
+      }
+      return result;
+    };
     const Inspector = () => {
       const { rpc, selectedId, selectedPath, loadingDetails } = useContext(AppContext);
 
@@ -531,6 +595,11 @@
               className={`px-3 py-2 ${activeTab === 'struct' ? 'border-b-2 border-blue-500 font-bold' : ''}`}>
               Internal Structure
             </button>
+            <button
+              onClick={() => setActiveTab('yaml')}
+              className={`px-3 py-2 ${activeTab === 'yaml' ? 'border-b-2 border-blue-500 font-bold text-blue-600 bg-white' : 'border-transparent text-gray-500'}`}>
+              YAML for LLM
+            </button>
             <button onClick={() => setActiveTab('elements')} className={`flex-1 py-2 border-b-2 ${activeTab === 'elements' ? 'border-blue-500 text-blue-600 bg-white' : 'border-transparent text-gray-500'}`}>
               Structure {hasElements ? `(${elementGroups.length})` : ''}
             </button>
@@ -594,7 +663,45 @@
                 ))}
               </div>
             )}
-
+            {activeTab === 'yaml' && (
+              structureData ? (
+                <div className="relative h-full flex flex-col">
+                  {/* 顶部工具栏 */}
+                  <div className="flex justify-between items-center p-2 bg-gray-50 border-b">
+                    <span className="text-xs text-gray-500">
+                      Copy this content to ChatGPT/Claude to analyze the structure.
+                    </span>
+                    <button
+                      onClick={(e) => {
+                        const content = dataToYaml(structureData);
+                        navigator.clipboard.writeText(content);
+                        const btn = e.target;
+                        const originalText = btn.innerText;
+                        btn.innerText = "Copied!";
+                        btn.className = "bg-green-600 text-white text-xs px-3 py-1 rounded transition-colors";
+                        setTimeout(() => {
+                          btn.innerText = originalText;
+                          btn.className = "bg-blue-600 hover:bg-blue-700 text-white text-xs px-3 py-1 rounded transition-colors";
+                        }, 2000);
+                      }}
+                      className="bg-blue-600 hover:bg-blue-700 text-white text-xs px-3 py-1 rounded transition-colors"
+                    >
+                      Copy to Clipboard
+                    </button>
+                  </div>
+                  {/* YAML 内容 */}
+                  <div className="flex-grow overflow-auto p-0 bg-[#f8f8f8]">
+                    <pre className="text-[11px] font-mono leading-relaxed p-4 text-gray-700 select-text">
+                      {dataToYaml(structureData)}
+                    </pre>
+                  </div>
+                </div>
+              ) : (
+                <div className="p-4 text-gray-400 text-xs flex items-center">
+                  <span className="animate-spin mr-2">⟳</span> Generating YAML...
+                </div>
+              )
+            )}
             {/* [新增] 结构视图 */}
             {activeTab === 'struct' && (
               structureData ? (
