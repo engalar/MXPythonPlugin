@@ -426,63 +426,29 @@
         </div>
       );
     };
-    // === 新增：YAML 转换工具 ===
-    const dataToYaml = (node, depth = 0) => {
-      if (!node) return '';
-      const indent = '  '.repeat(depth);
 
-      // 1. 纯值节点
-      if (node.metaType === 'Value') return `${node.value}\n`;
-
-      let result = '';
-
-      // 2. 属性 (Attributes)
-      if (node.attributes) {
-        node.attributes.forEach(attr => {
-          // 移除值中的换行符以免破坏 YAML 结构
-          const cleanValue = String(attr.value).replace(/\n/g, '\\n');
-          result += `${indent}${attr.key}: ${cleanValue}\n`;
-        });
-      }
-
-      // 3. 子节点 (Children)
-      if (node.children) {
-        node.children.forEach(child => {
-          if (Array.isArray(child.data)) {
-            // 列表类型
-            result += `${indent}${child.key}:\n`;
-            if (child.data.length === 0) result += `${indent}  []\n`;
-            child.data.forEach(item => {
-              // 列表项：先起一行 "- "，然后后续属性缩进对齐
-              result += `${indent}  -\n${dataToYaml(item, depth + 2)}`;
-            });
-          } else {
-            // 对象类型
-            // 如果对象为空，显示 (Empty)
-            if (!child.data) {
-              result += `${indent}${child.key}: null\n`;
-            } else if (child.data.metaType === 'Value') {
-              // 如果子节点直接是值，类似 "Name: Value"
-              result += `${indent}${child.key}: ${child.data.value}\n`;
-            } else {
-              result += `${indent}${child.key}:\n${dataToYaml(child.data, depth + 1)}`;
-            }
-          }
-        });
-      }
-      return result;
-    };
     const Inspector = () => {
       const { rpc, selectedId, selectedPath, loadingDetails } = useContext(AppContext);
 
       // State: 历史记录 [{ id, name, segment }] 和 当前指针
       const [history, setHistory] = useState([]);
       const [cursor, setCursor] = useState(-1);
+      const [yamlContent, setYamlContent] = useState("");
+      const [yamlDepth, setYamlDepth] = useState(15);
 
       const [currentData, setCurrentData] = useState(null);
       const [loading, setLoading] = useState(false);
       const [structureData, setStructureData] = useState(null);
       const [activeTab, setActiveTab] = useState('props');
+
+      useEffect(() => {
+        if (activeTab === 'yaml' && currentData) {
+          setYamlContent("Loading customized YAML...");
+          rpc.call('get_ai_yaml', { node_id: currentData.id, max_depth: yamlDepth })
+            .then(setYamlContent)
+            .catch(e => setYamlContent("Error: " + e));
+        }
+      }, [activeTab, currentData, yamlDepth]);
 
       useEffect(() => {
         if (!currentData) return;
@@ -664,43 +630,71 @@
               </div>
             )}
             {activeTab === 'yaml' && (
-              structureData ? (
-                <div className="relative h-full flex flex-col">
-                  {/* 顶部工具栏 */}
-                  <div className="flex justify-between items-center p-2 bg-gray-50 border-b">
-                    <span className="text-xs text-gray-500">
-                      Copy this content to ChatGPT/Claude to analyze the structure.
-                    </span>
+              <div className="relative h-full flex flex-col">
+                <div className="flex justify-between items-center p-2 bg-gray-50 border-b">
+                  <span className="text-xs text-gray-500">LLM Optimized Context (DSL Filtered)</span>
+                  <div className="flex items-center space-x-3">
+                    <label htmlFor="yaml-depth" className="text-xs text-gray-500">Depth:</label>
+                    <input
+                      id="yaml-depth"
+                      type="number"
+                      min="1"
+                      max="50"
+                      value={yamlDepth}
+                      onChange={(e) => setYamlDepth(Math.max(1, Math.min(50, parseInt(e.target.value) || 1)))}
+                      className="w-14 p-1 border rounded text-xs text-center"
+                      title="Controls the maximum recursion depth for YAML extraction. Changes reload the YAML automatically."
+                    />
                     <button
                       onClick={(e) => {
-                        const content = dataToYaml(structureData);
-                        navigator.clipboard.writeText(content);
+                        if (!yamlContent) return;
+
+                        // 1. 尝试使用 Clipboard API
+                        navigator.clipboard.writeText(yamlContent).then(() => {
+                          feedback("Copied!");
+                        }).catch(err => {
+                          console.error("Clipboard API failed:", err);
+                          // 2. 降级方案：创建一个隐藏的 textarea 选中文本进行复制
+                          const textArea = document.createElement("textarea");
+                          textArea.value = yamlContent;
+                          textArea.style.position = "fixed"; // 避免滚动到底部
+                          document.body.appendChild(textArea);
+                          textArea.focus();
+                          textArea.select();
+                          try {
+                            document.execCommand('copy');
+                            feedback("Copied (Fallback)!");
+                          } catch (err) {
+                            feedback("Failed to copy");
+                          }
+                          document.body.removeChild(textArea);
+                        });
+
+                        // 按钮反馈逻辑
                         const btn = e.target;
                         const originalText = btn.innerText;
-                        btn.innerText = "Copied!";
-                        btn.className = "bg-green-600 text-white text-xs px-3 py-1 rounded transition-colors";
-                        setTimeout(() => {
-                          btn.innerText = originalText;
-                          btn.className = "bg-blue-600 hover:bg-blue-700 text-white text-xs px-3 py-1 rounded transition-colors";
-                        }, 2000);
+                        const feedback = (msg) => {
+                          btn.innerText = msg;
+                          btn.className = "bg-green-600 text-white text-xs px-3 py-1 rounded transition-all";
+                          setTimeout(() => {
+                            btn.innerText = "Copy to Clipboard";
+                            btn.className = "bg-blue-600 hover:bg-blue-700 text-white text-xs px-3 py-1 rounded transition-all";
+                          }, 2000);
+                        };
                       }}
-                      className="bg-blue-600 hover:bg-blue-700 text-white text-xs px-3 py-1 rounded transition-colors"
+                      className="bg-blue-600 hover:bg-blue-700 text-white text-xs px-3 py-1 rounded transition-all"
                     >
                       Copy to Clipboard
                     </button>
                   </div>
-                  {/* YAML 内容 */}
-                  <div className="flex-grow overflow-auto p-0 bg-[#f8f8f8]">
-                    <pre className="text-[11px] font-mono leading-relaxed p-4 text-gray-700 select-text">
-                      {dataToYaml(structureData)}
-                    </pre>
-                  </div>
+
                 </div>
-              ) : (
-                <div className="p-4 text-gray-400 text-xs flex items-center">
-                  <span className="animate-spin mr-2">⟳</span> Generating YAML...
+                <div className="flex-grow overflow-auto p-0 bg-[#1e1e1e] text-gray-300">
+                  <pre className="text-[11px] font-mono leading-relaxed p-4 select-text whitespace-pre-wrap">
+                    {yamlContent}
+                  </pre>
                 </div>
-              )
+              </div>
             )}
             {/* [新增] 结构视图 */}
             {activeTab === 'struct' && (

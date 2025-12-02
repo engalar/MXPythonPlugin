@@ -83,6 +83,208 @@ class MendixApp:
 
 app = MendixApp()
 
+# ==========================================
+# [CORE] Mendix Untyped API Wrapper
+# ==========================================
+class MxNode:
+    """
+    一个Pythonic的Mendix对象包装器，屏蔽底层的GetProperties/Type/Value复杂性。
+    用法:
+       node = MxNode(element)
+       name = node['Name']
+       attrs = node.children('Attributes') # 返回 MxNode 列表
+    """
+    def __init__(self, raw_element):
+        self.raw = raw_element
+        self._props = {}
+        if raw_element and hasattr(raw_element, "GetProperties"):
+            for p in raw_element.GetProperties():
+                self._props[p.Name] = p
+
+    @property
+    def type(self):
+        # 检查 1: 如果 self.raw 是一个字符串，直接返回 "String"
+        if isinstance(self.raw, str):
+            return "String"
+
+        # 检查 2: 如果 self.raw 存在（非 None, 非空列表等）并且具有 'Type' 属性
+        # 注意：如果 self.raw 是字符串，此分支不会被执行，因为它已经在上面被捕获了
+        if self.raw and hasattr(self.raw, 'Type'):
+            # 确保 self.raw.Type 存在后，执行分割逻辑
+            return str(self.raw.Type).split('$')[-1]
+        
+        # 否则，返回默认值 "Null"
+        return "Null"
+
+    @property
+    def full_type(self):
+        return str(self.raw.Type) if self.raw else "Null"
+    
+    def has(self, key):
+        return key in self._props
+
+    def get(self, key, default=None):
+        """获取简单值 (String, Bool, Int, Enum)"""
+        if key not in self._props: return default
+        val = self._props[key].Value
+        return str(val) if val is not None else default
+
+    def resolve(self, key):
+        """获取引用对象 (Reference)，返回 MxNode"""
+        if key not in self._props: return None
+        val = self._props[key].Value
+        return MxNode(val) if val else None
+
+    def children(self, key):
+        """获取列表子项 (List)，返回 [MxNode]"""
+        if key not in self._props: return []
+        prop = self._props[key]
+        if not prop.IsList or not prop.Value: return []
+        return [MxNode(item) for item in prop.Value]
+
+    def __getitem__(self, key):
+        return self.get(key)
+    
+    def __repr__(self):
+        return f"<MxNode {self.type}: {self.get('Name', 'NoName')}>"
+    
+# 1. 默认 DSL 配置 (可以从文件加载)
+# 格式: "类型名": { "include": [字段], "rename": {内:外}, "recurse": {内: 规则名} }
+DEFAULT_DSL = {
+    # === 1. 全局默认 (Fallback) ===
+    # 如果没有匹配到特定类型，则默认输出所有属性，但限制深度
+    "__DEFAULT__": {
+        "include": ["*"], 
+        "recurse": { "*": None }
+    },
+}
+
+class YamlExtractor:
+    def __init__(self, dsl_config=None):
+        self.config = dsl_config if dsl_config else DEFAULT_DSL
+
+    def extract(self, element, rule_name=None, depth=0, max_depth=5):
+        # 1. 深度保护
+        if depth > max_depth:
+            return "..." 
+
+        node = MxNode(element)
+        if not node.raw: return None
+        if node.type == "String": return node.raw
+
+        # 2. 确定规则
+        rule_key = rule_name if rule_name else node.type
+        rule = self.config.get(rule_key, self.config.get("__DEFAULT__"))
+
+        result = {}
+        
+        include_list = rule.get("include", [])
+        include_all = "*" in include_list
+        
+        recurse_map = rule.get("recurse", {})
+        recurse_all = "*" in recurse_map
+
+        # === 遍历属性 ===
+        for prop_name, prop_obj in node._props.items():
+            
+            is_list = prop_obj.IsList
+            val = prop_obj.Value
+            
+            # 判断引用类型
+            is_ref = val is not None and not is_list and hasattr(val, "GetProperties")
+            
+            # --- 分支 A: 处理 List 或 Reference ---
+            if is_list or is_ref:
+                target_rule = None
+                should_recurse = False
+
+                if recurse_all:
+                    should_recurse = True
+                    target_rule = None 
+                elif prop_name in recurse_map:
+                    should_recurse = True
+                    target_rule = recurse_map[prop_name]
+
+                if should_recurse:
+                    out_key = rule.get("rename", {}).get(prop_name, prop_name)
+                    
+                    if is_list:
+                        # [修复点] C# List 不能直接切片
+                        # 必须先用 list() 将其转换为 Python 列表
+                        raw_collection = val if val else []
+                        py_list = list(raw_collection) 
+                        
+                        children_data = []
+                        # 现在可以安全地切片了
+                        for item in py_list[:20]: 
+                            child_res = self.extract(item, target_rule, depth + 1, max_depth)
+                            if child_res: children_data.append(child_res)
+                            
+                        if children_data:
+                            result[out_key] = children_data
+                    else:
+                        # 单引用
+                        child_res = self.extract(val, target_rule, depth + 1, max_depth)
+                        if child_res:
+                            result[out_key] = child_res
+
+            # --- 分支 B: 处理普通值 ---
+            else:
+                should_include = False
+                if include_all:
+                    should_include = True
+                elif prop_name in include_list:
+                    should_include = True
+                
+                if should_include:
+                    out_key = rule.get("rename", {}).get(prop_name, prop_name)
+                    v_str = str(val) if val is not None else "null"
+                    if v_str != "null" and v_str != "":
+                        result[out_key] = v_str
+
+        # 补充 Type 标识
+        if "_Type" not in result:
+            result = {"_Type": node.type, **result}
+
+        return result
+
+    def to_yaml(self, data):
+        # 保持之前的 YAML 转换逻辑不变
+        def dump(obj, depth=0):
+            indent = "  " * depth
+            if obj is None: return "null"
+            if isinstance(obj, (str, int, float, bool)): return str(obj)
+            
+            lines = []
+            if isinstance(obj, dict):
+                for k, v in obj.items():
+                    if v is None: continue
+                    if isinstance(v, list) and len(v) == 0: continue
+                    
+                    if isinstance(v, list):
+                        lines.append(f"{indent}{k}:")
+                        for item in v:
+                            if isinstance(item, dict):
+                                keys = list(item.keys())
+                                if keys:
+                                    first_k = keys[0]
+                                    rest_obj = item.copy()
+                                    del rest_obj[first_k]
+                                    lines.append(f"{indent}  - {first_k}: {dump(item[first_k], 0)}")
+                                    if rest_obj:
+                                        lines.append(dump(rest_obj, depth + 2))
+                            else:
+                                lines.append(f"{indent}  - {dump(item, 0)}")
+                    elif isinstance(v, dict):
+                         lines.append(f"{indent}{k}:\n{dump(v, depth + 1)}")
+                    else:
+                        val_str = str(v).replace('\n', '\\n')
+                        lines.append(f"{indent}{k}: {val_str}")
+            return "\n".join(lines)
+        return dump(data)
+
+extractor = YamlExtractor()
+
 # === 2. BUSINESS LOGIC ===
 
 def get_node_type_category(element_type: str, is_unit: bool) -> str:
@@ -144,10 +346,27 @@ def get_children(parent_id: str):
     if not parent: raise Exception("Node expired")
     
     children = []
-    # Only drill down into Units (Folders/Modules) for the TreeView
+    
+    # 逻辑：直接子节点 = 所有后代 - 子文件夹中的后代
     if hasattr(parent, "GetUnits"):
-        for u in parent.GetUnits():
-            children.append(serialize_summary(u))
+        # 1. 获取当前节点下所有的单元 (递归列表，包含直接和间接)
+        all_descendants = list(parent.GetUnits())
+        
+        # 2. 获取当前节点下所有的文件夹
+        sub_folders = list(parent.GetUnitsOfType('Projects$Folder'))
+        
+        # 3. 收集所有“间接节点”的 ID
+        # 如果一个单元存在于任意一个子文件夹中，那它对于当前 parent 来说就是间接的
+        indirect_ids = set()
+        for folder in sub_folders:
+            # 这里的 folder.GetUnits() 会返回该文件夹下的所有内容
+            for sub_unit in folder.GetUnits():
+                indirect_ids.add(str(sub_unit.ID))
+        
+        # 4. 筛选：保留不在 indirect_ids 集合中的节点
+        for u in all_descendants:
+            if str(u.ID) not in indirect_ids:
+                children.append(serialize_summary(u))
             
     return sorted(children, key=lambda x: (x['category'] != 'folder', x['name']))
 
@@ -343,6 +562,26 @@ def get_structure(node_id: str):
     target = app.get_cached(node_id)
     if not target: raise Exception("Node not found")
     return StructureExplorer.explore(target)
+@app.route("get_ai_yaml")
+def get_ai_yaml(node_id: str, max_depth: int = 15):
+    """
+    专门为 LLM 设计的端点。
+    根据 DSL 清洗数据，并返回纯文本 YAML。
+    """
+    target = app.get_cached(node_id)
+    if not target: return "Error: Node not found"
+
+    # 执行提取
+    try:
+        clean_data = extractor.extract(target, max_depth=max_depth)
+        # 生成 YAML 字符串
+        yaml_text = extractor.to_yaml(clean_data)
+        
+        # 加上头部注释，帮助 LLM 理解上下文
+        header = f"# Mendix Object Context\n# Type: {target.Type}\n# ID: {node_id}\n\n"
+        return header + yaml_text
+    except Exception as e:
+        return f"Error generating YAML: {str(e)}\n{traceback.format_exc()}"
 
 # === 3. ENTRY POINT ===
 PostMessage("backend:clear", '')
