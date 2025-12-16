@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <script src="assets/tailwindcss.js"></script>
+</head>
+
+<body class="bg-gray-100 font-sans">
+    <div id="app"></div>
+
+    <script src="assets/vendor-bundle.umd.js"></script>
+    <script src="assets/babel.min.js"></script>
+    <script type="text/babel">
+
+        // ===================================================================
+        // ===================     FRAMEWORK CODE     ========================
+        // ===================================================================
+        // This section contains the reusable, application-agnostic core.
+        // You should not need to modify this section to add new features.
+        // -------------------------------------------------------------------
+ 
+        // 等价于
+        // import * as React from 'react';
+        // import ReactDOM from 'react-dom/client';
+        // import * as redi from '@wendellhu/redi';
+        // import * as rediReact from '@wendellhu/redi/react-bindings';
+        // import * as rxjs from 'rxjs';
+        // import * as reactSpring from '@react-spring/web';
+        const { React, ReactDOM, redi, rediReact, rxjs, reactSpring } = globalThis.__tmp;
+        delete globalThis.__tmp;
+
+        // keep unused import for redi and rediReact
+        const {
+            Inject,
+            Injector,
+            LookUp,
+            Many,
+            Optional,
+            Quantity,
+            RediError,
+            Self,
+            SkipSelf,
+            WithNew,
+            createIdentifier,
+            forwardRef,
+            isAsyncDependencyItem,
+            isAsyncHook,
+            isClassDependencyItem,
+            isCtor,
+            isDisposable,
+            isFactoryDependencyItem,
+            isValueDependencyItem,
+            setDependencies,
+        } = redi;
+        const {
+            RediConsumer,
+            RediContext,
+            RediProvider,
+            WithDependency,
+            connectDependencies,
+            connectInjector,
+            useDependency,
+            useInjector,
+            useObservable,
+            useUpdateBinder,
+        } = rediReact;
+        const {
+            useState,
+            useEffect,
+            useRef,
+            useReducer,
+            Fragment,
+            useCallback,
+            createContext,
+            useContext,
+        } = React;
+        // 1. FRAMEWORK: CORE COMMUNICATION SERVICES
+
+        const IBackendEventService = createIdentifier("IBackendEventService");
+        class BackendEventService {
+            constructor() {
+                this.subscribers = new Map();
+            }
+
+            subscribe(eventType, callback) {
+                if (!this.subscribers.has(eventType)) {
+                    this.subscribers.set(eventType, new Set());
+                }
+                this.subscribers.get(eventType).add(callback);
+                return () => {
+                    const eventSubscribers = this.subscribers.get(eventType);
+                    if (eventSubscribers) {
+                        eventSubscribers.delete(callback);
+                    }
+                };
+            }
+
+            publish(eventType, data) {
+                const eventSubscribers = this.subscribers.get(eventType);
+                if (eventSubscribers) {
+                    eventSubscribers.forEach((callback) => callback(data));
+                }
+            }
+        }
+        setDependencies(BackendEventService, []);
+
+        const IMessageService = createIdentifier("IMessageService");
+        class BrowserMessageService {
+            constructor(eventService) {
+                this.eventService = eventService;
+                this.requestId = 0;
+                this.handleBackendResponse = this.handleBackendResponse.bind(this);
+                this.initializeListener();
+            }
+            async call(type, payload) {
+                const correlationId = `req-${this.requestId++}`;
+                const command = { type, payload, correlationId, timestamp: new Date().toISOString() };
+                window.parent.sendMessage("frontend:message", command);
+                return correlationId;
+            }
+            initializeListener() {
+                window.addEventListener("message", this.handleBackendResponse);
+            }
+            handleBackendResponse(event) {
+                if (event.data && event.data.type === "backendResponse") {
+                    try {
+                        const response = JSON.parse(event.data.data);
+                        this.eventService.publish("backendResponse", response);
+                    } catch (e) {
+                        console.error("Fatal error parsing backend response:", e, event.data.data);
+                    }
+                }
+            }
+            dispose() {
+                window.removeEventListener("message", this.handleBackendResponse);
+            }
+        }
+        setDependencies(BrowserMessageService, [IBackendEventService]);
+
+        // 2. FRAMEWORK: HIGH-LEVEL COMMAND ABSTRACTION
+
+        const ICommandService = createIdentifier("ICommandService");
+        class CommandService {
+            constructor(messageService, eventService) {
+                this.messageService = messageService;
+                this.pendingCommands = new Map();
+                this.RPC_TIMEOUT = 10000;
+                this.handleBackendResponse = this.handleBackendResponse.bind(this);
+                eventService.subscribe("backendResponse", this.handleBackendResponse);
+            }
+
+            execute = (type, payload) => {
+                return new Promise(async (resolve, reject) => {
+                    const commandId = await this.messageService.call(type, payload);
+                    const timeoutId = setTimeout(() => {
+                        if (this.pendingCommands.has(commandId)) {
+                            this.pendingCommands.delete(commandId);
+                            reject(new Error(`Command '${type}' timed out.`));
+                        }
+                    }, this.RPC_TIMEOUT);
+                    this.pendingCommands.set(commandId, { resolve, reject, timeoutId, type });
+                });
+            };
+
+            handleBackendResponse(response) {
+                const { correlationId, taskId } = response;
+                if (correlationId && this.pendingCommands.has(correlationId)) {
+                    // Sync RPC or Async Task Initiation
+                    const cmd = this.pendingCommands.get(correlationId);
+                    if (response.status === "success") {
+                        if (response.data && response.data.taskId) {
+                            // It's an async task starting. Transfer promise to the new taskId.
+                            const newTaskId = response.data.taskId;
+                            this.pendingCommands.delete(correlationId); // remove old correlationId
+                            this.pendingCommands.set(newTaskId, cmd); // re-map with taskId
+                        } else {
+                            // It's a normal sync RPC response.
+                            clearTimeout(cmd.timeoutId);
+                            this.pendingCommands.delete(correlationId);
+                            cmd.resolve(response.data);
+                        }
+                    } else {
+                        // Error on initiation
+                        clearTimeout(cmd.timeoutId);
+                        this.pendingCommands.delete(correlationId);
+                        cmd.reject(new Error(response.message || "An unknown backend error occurred."));
+                    }
+                } else if (taskId && this.pendingCommands.has(taskId)) {
+                    // Async Task Completion
+                    const cmd = this.pendingCommands.get(taskId);
+                    clearTimeout(cmd.timeoutId); // In case we want a total task timeout
+                    this.pendingCommands.delete(taskId);
+
+                    if (response.status === "success") {
+                        cmd.resolve(response.data);
+                    } else {
+                        cmd.reject(new Error(response.message || "Async task failed."));
+                    }
+                }
+            }
+        }
+        setDependencies(CommandService, [IMessageService, IBackendEventService]);
+
+        // 3. FRAMEWORK: UNIFIED REACT HOOK FOR UI COMPONENTS
+
+        const useCommand = () => {
+            const commandService = useDependency(ICommandService);
+            const [isLoading, setIsLoading] = useState(false);
+            const [error, setError] = useState(null);
+            const [data, setData] = useState(null);
+
+            const execute = useCallback(async (type, payload) => {
+                setIsLoading(true);
+                setError(null);
+                setData(null);
+                try {
+                    const result = await commandService.execute(type, payload);
+                    setData(result);
+                    return result;
+                } catch (err) {
+                    setError(err.message);
+                    throw err;
+                } finally {
+                    setIsLoading(false);
+                }
+            }, [commandService]);
+
+            return { execute, isLoading, error, data };
+        };
+
+        // 4. FRAMEWORK: BOOTSTRAPPING AND VIEW MANAGEMENT
+
+        const IView = createIdentifier("IView");
+        class ViewManagementService {
+            constructor(views) { this.views = views; }
+            getViews() { return this.views; }
+        }
+        setDependencies(ViewManagementService, [[new Many(), IView]]);
+
+        const App = () => {
+            const viewManager = useDependency(ViewManagementService);
+            return (
+                <div className="p-4 max-w-5xl mx-auto bg-gray-50 shadow-lg rounded-lg flex flex-col h-[100vh]">
+                    {viewManager.getViews().map((ViewComponent, index) => (
+                        <Fragment key={index}><ViewComponent /></Fragment>
+                    ))}
+                </div>
+            );
+        };
+
+        const Alert = ({ message, type }) => {
+            const baseClasses = "text-sm px-4 py-2 rounded-md";
+            const typeClasses = {
+                success: "bg-green-100 text-green-800",
+                error: "bg-red-100 text-red-800",
+            };
+            return <div className={`${baseClasses} ${typeClasses[type]}`}>{message}</div>;
+        };
+
+
+        // ===================================================================
+        // ===============     BUSINESS LOGIC CODE     =======================
+        // ===================================================================
+        // This section contains your feature-specific components (Views).
+        // To add a new feature, add your new Component here and register
+        // it as an `IView` in the IOC Configuration section below.
+        // -------------------------------------------------------------------
+
+        const BridgeControlView = () => {
+            const [serverState, setServerState] = useState({ status: 'unknown', port: null });
+            const { execute, isLoading, error } = useCommand();
+
+            const fetchStatus = useCallback(async () => {
+                try {
+                    const data = await execute('SERVER_GET_STATUS', {});
+                    setServerState(data);
+                } catch (e) { setServerState({ status: 'error' }); }
+            }, [execute]);
+
+            useEffect(() => { fetchStatus(); }, [fetchStatus]);
+
+            const handleToggle = async (action) => {
+                try {
+                    const cmd = action === 'start' ? 'SERVER_START' : 'SERVER_STOP';
+                    const finalState = await execute(cmd, {});
+                    setServerState(finalState);
+                } catch (e) { console.error(e); fetchStatus(); }
+            };
+
+            const isRunning = serverState.status === 'running';
+
+            return (
+                <div className="p-6">
+                    <h2 className="text-2xl font-bold text-gray-800 mb-4">Browser Inspector Bridge</h2>
+                    
+                    <div className="bg-blue-50 border border-blue-200 rounded p-4 mb-6">
+                        <p className="text-blue-800 text-sm">
+                            This server listens for requests from the browser UserScript to open elements in Studio Pro.
+                            <br/>
+                            <strong>Endpoint:</strong> http://localhost:{serverState.port || 5000}/open_in_studio_pro
+                        </p>
+                    </div>
+
+                    <div className="flex items-center justify-between bg-white p-4 rounded shadow-sm border border-gray-200 mb-6">
+                        <div className="flex items-center space-x-3">
+                            <div className={`w-4 h-4 rounded-full ${isRunning ? 'bg-green-500' : 'bg-red-500'}`}></div>
+                            <span className="font-medium text-gray-700">
+                                {isRunning ? `Running on port ${serverState.port}` : 'Stopped'}
+                            </span>
+                        </div>
+                        <button onClick={fetchStatus} className="text-sm text-gray-500 hover:text-gray-700 underline">
+                            Check Status
+                        </button>
+                    </div>
+
+                    <button 
+                        onClick={() => handleToggle(isRunning ? 'stop' : 'start')} 
+                        disabled={isLoading}
+                        className={`w-full py-3 rounded-lg font-semibold text-white transition-colors shadow-md
+                            ${isRunning 
+                                ? 'bg-red-600 hover:bg-red-700' 
+                                : 'bg-blue-600 hover:bg-blue-700'} 
+                            ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
+                    >
+                        {isLoading ? 'Processing...' : (isRunning ? 'Stop Server' : 'Start Server')}
+                    </button>
+                    
+                    {error && <p className="text-red-600 mt-4 text-center">{error}</p>}
+                </div>
+            );
+        };
+
+        // ===================================================================
+        // ==============     IOC & APP INITIALIZATION     ===================
+        // ===================================================================
+
+        const AppWithDependencies = connectDependencies(App, [
+            // --- Framework Registrations ---
+            [ViewManagementService],
+            [IBackendEventService, { useClass: BackendEventService }],
+            [IMessageService, { useClass: BrowserMessageService }],
+            [ICommandService, { useClass: CommandService }],
+
+            // --- Business Logic Registrations ---
+            // To add a new view, simply add another line here like the one below.
+            [IView, { useValue: BridgeControlView }],
+        ]);
+
+        const root = ReactDOM.createRoot(document.getElementById("app"));
+        root.render(<AppWithDependencies />);
+    </script>
+</body>
+
+</html>
