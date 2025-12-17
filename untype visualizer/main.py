@@ -521,9 +521,8 @@ class StructureExplorer:
                     # 如果是列表 (List of Elements)
                     if p.IsList:
                         child_nodes = []
-                        # 仅取前 3 个作为样本，防止过大
                         if p.Value: 
-                            for item in list(p.Value)[:3]:
+                            for item in list(p.Value):
                                 child_nodes.append(StructureExplorer.explore(item))
                         
                         result["children"].append({
