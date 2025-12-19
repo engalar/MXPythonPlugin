@@ -191,6 +191,10 @@ class Projects_Module(MendixElement):
         )
         return ElementFactory.create(raw_wf, self.ctx)
 
+@MendixMap("Projects$Folder")
+class Projects_Folder(MendixElement):
+    """文件夹包装类"""
+    pass
 
 # endregion
 # region 2.1 DomainModels
@@ -1067,7 +1071,7 @@ class MicroflowAnalyzer:
             return
 
         # 修改点1：打印全名
-        self.ctx.log(f"# MICROFLOW: {module_name}.{mf.name}\n'''")
+        self.ctx.log(f"# MICROFLOW: {module_name}.{mf.name}\n```")
 
         nodes = {obj.id: obj for obj in mf.object_collection.objects}
         adj = {}
@@ -1114,7 +1118,7 @@ class MicroflowAnalyzer:
                 new_indent = indent + 1 if has_branches else indent
                 stack.append((target_id, new_indent, case_val))
 
-        self.ctx.log(f"'''")
+        self.ctx.log(f"```")
 
 
 class PageAnalyzer:
@@ -1214,6 +1218,68 @@ class WorkflowAnalyzer:
                     if hasattr(outcome, "flow"):
                         self._render_flow(outcome.flow, indent + 2)
 
+class ModuleTreeAnalyzer:
+    def __init__(self, context):
+        self.ctx = context
+        # 定义需要展示在树状结构中的文档类型映射
+        self.alias_map = {
+            "Microflows$Microflow": "Microflow",
+            "Pages$Page": "Page",
+            "Workflows$Workflow": "Workflow",
+            "Nanoflows$Nanoflow": "Nanoflow",
+            "Constants$Constant": "Constant",
+            "Enumerations$Enumeration": "Enumeration"
+        }
+
+    def execute(self, module_name):
+        module = self.ctx.find_module(module_name)
+        if not module: return
+
+        self.ctx.log(f"# MODULE STRUCTURE: {module.name}\n```")
+        # 从模块根部开始递归
+        self._render_container(module._raw, 0)
+        self.ctx.log(f"```")
+
+    def _render_container(self, container_raw, indent):
+        """核心逻辑：获取所有单元，过滤掉文件夹重叠和无名单元"""
+        
+        # 1. 获取该容器下所有的单元 (递归获取所有)
+        all_units = list(container_raw.GetUnits())
+        
+        # 2. 识别所有“非直接”的后代 ID
+        # 我们需要先找出所有文件夹，再看这些文件夹里面包含了什么
+        all_sub_folders = [u for u in all_units if u.Type == "Projects$Folder"]
+        
+        descendant_ids = set()
+        for sub_f in all_sub_folders:
+            # 获取该文件夹下的所有子孙单元并记录其 ID
+            for grand_unit in sub_f.GetUnits():
+                descendant_ids.add(grand_unit.ID.ToString())
+
+        # 3. 过滤出当前层级的“直接”单元
+        # 条件：ID 不在后代集合中，且 Name 属性不为空
+        direct_units = [
+            u for u in all_units 
+            if u.ID.ToString() not in descendant_ids and getattr(u, "Name", None)
+        ]
+
+        # 4. 分离文件夹与文档 (用于分别渲染)
+        # direct_folders 仅包含 Projects$Folder
+        direct_folders = [u for u in direct_units if u.Type == "Projects$Folder"]
+        # direct_docs 包含除了文件夹以外的所有东西
+        direct_docs = [u for u in direct_units if u.Type != "Projects$Folder"]
+
+        # 5. 渲染文档
+        # 按名称排序，并处理别名
+        for d in sorted(direct_docs, key=lambda x: x.Name):
+            full_type = d.Type
+            type_label = self.alias_map.get(full_type, full_type.split('$')[-1])
+            self.ctx.log(f"[{type_label}] {d.Name}", indent)
+
+        # 6. 渲染文件夹并递归
+        for f in sorted(direct_folders, key=lambda x: x.Name):
+            self.ctx.log(f"📁 {f.Name}", indent)
+            self._render_container(f, indent + 1)
 
 # endregion
 
@@ -1221,6 +1287,10 @@ class WorkflowAnalyzer:
 try:
     PostMessage("backend:clear", "")
     ctx = MendixContext(currentApp, root)
+
+    # 分析模块文件结构
+    target_mod = "AltairIntegration" # 替换为你的模块名
+    ModuleTreeAnalyzer(ctx).execute(target_mod)
 
     # 分析领域模型
     DomainModelAnalyzer(ctx).execute("AmazonBedrockConnector")  # 替换为你的模块名
@@ -1232,7 +1302,7 @@ try:
     # 分析页面
     PageAnalyzer(ctx).execute("Evora_UI", "Login")
     # 参数 1: 模块名, 参数 2: 工作流名
-    WorkflowAnalyzer(ctx).execute("Module", "Workflow")
+    WorkflowAnalyzer(ctx).execute("AltairIntegration", "WF_ScheduleTechnicianAppointment")
     # --- 获取分析报告内容 ---
     final_report = ctx.flush_logs()
 
