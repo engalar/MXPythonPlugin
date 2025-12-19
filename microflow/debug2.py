@@ -141,6 +141,9 @@ class MendixElement:
             else:
                 result = val
 
+        if name=='documentation':
+            if len(result) > 30:
+                result = result[:30] + "..."
         self._cache[name] = result
         return result
 
@@ -218,7 +221,8 @@ class DomainModels_Association(MendixElement):
     def get_info(self, lookup):
         p_name = lookup.get(str(self.parent), "Unknown")
         c_name = lookup.get(str(self.child), "Unknown")
-        return f"- [Assoc] {self.name}: {p_name} -> {c_name} [Type:{self.type}, Owner:{self.owner}]"
+        # 省略模块名
+        return f"- [Assoc] {self.name}: {p_name.split('.')[-1]} -> {c_name.split('.')[-1]} [Type:{self.type}, Owner:{self.owner}]"
 
 
 @MendixMap("DomainModels$CrossAssociation")
@@ -226,7 +230,7 @@ class DomainModels_CrossAssociation(MendixElement):
     def get_info(self, lookup):
         p_name = lookup.get(str(self.parent), "Unknown")
         # CrossAssociation 的 child 属性通常已经是字符串全名
-        return f"- [Cross] {self.name}: {p_name} -> {self.child} [Type:{self.type}, Owner:{self.owner}]"
+        return f"- [Cross] {self.name}: {p_name.split('.')[-1]} -> {self.child} [Type:{self.type}, Owner:{self.owner}]"
 
 
 @MendixMap("DomainModels$AssociationOwner")
