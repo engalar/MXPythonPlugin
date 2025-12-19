@@ -350,6 +350,384 @@ class DataTypes_BooleanType(MendixElement):
 #endregion
 
 #region 2.1 Pages
+from typing import List, Optional
+
+# Base Classes for Polymorphism
+
+@MendixMap("Pages$Widget")
+class Pages_Widget(MendixElement):
+    # Base class for all widgets
+    pass
+
+@MendixMap("Pages$ClientAction")
+class Pages_ClientAction(MendixElement):
+    # .disabled_during_execution:bool
+    pass
+
+@MendixMap("Pages$DesignPropertyValue")
+class Pages_DesignPropertyValue(MendixElement):
+    # Base class for design properties
+    pass
+
+@MendixMap("Pages$Icon")
+class Pages_Icon(MendixElement):
+    # Base class for icons
+    pass
+
+# --- Core Page Structure ---
+
+@MendixMap("Pages$Page")
+class Pages_Page(MendixElement):
+    # .layout_call:Pages_LayoutCall
+    # .layout:str
+    # .title:Texts_Text
+    # .appearance:Pages_Appearance
+    # .name:str
+    # .excluded:bool
+    # .export_level:str
+    # .canvas_width:int
+    # .canvas_height:int
+    # .allowed_roles:List[str]
+    # .popup_width:int
+    # .popup_height:int
+    # .popup_resizable:bool
+    # .mark_as_used:bool
+    pass
+
+@MendixMap("Pages$LayoutCall")
+class Pages_LayoutCall(MendixElement):
+    # .arguments:List[Pages_LayoutCallArgument]
+    # .layout:str
+    pass
+
+@MendixMap("Pages$LayoutCallArgument")
+class Pages_LayoutCallArgument(MendixElement):
+    # .widgets:List[Pages_Widget]
+    # .parameter:str
+    pass
+
+@MendixMap("Pages$Appearance")
+class Pages_Appearance(MendixElement):
+    # .class_:str
+    # .design_properties:List[Pages_DesignPropertyValue]
+    pass
+
+# --- Design Properties ---
+
+@MendixMap("Pages$OptionDesignPropertyValue")
+class Pages_OptionDesignPropertyValue(Pages_DesignPropertyValue):
+    # .option:str
+    # .key:str
+    pass
+
+@MendixMap("Pages$ToggleDesignPropertyValue")
+class Pages_ToggleDesignPropertyValue(Pages_DesignPropertyValue):
+    # .key:str
+    pass
+
+@MendixMap("Pages$CompoundDesignPropertyValue")
+class Pages_CompoundDesignPropertyValue(Pages_DesignPropertyValue):
+    # .properties:List[Pages_DesignPropertyValue]
+    # .key:str
+    pass
+
+# --- Custom Widget Metamodel ---
+
+@MendixMap("Pages$CustomWidget")
+class Pages_CustomWidget(Pages_Widget):
+    # .appearance:Pages_Appearance
+    # .type:Pages_CustomWidgetType
+    # .object:Pages_WidgetObject
+    # .name:str
+    # .tab_index:int
+    # .editable:str
+    # .widget_id:str
+    # .needs_entity_context:bool
+    # .plugin_widget:bool
+    # .description:str
+    # .studio_pro_category:str
+    # .studio_category:str
+    # .supported_platform:str
+    # .offline_capable:bool
+    # .help_url:str
+    pass
+
+@MendixMap("Pages$CustomWidgetType")
+class Pages_CustomWidgetType(MendixElement):
+    # .object_type:Pages_WidgetObjectType
+    # .widget_id:str
+    # .needs_entity_context:bool
+    # .plugin_widget:bool
+    # .name:str
+    # .description:str
+    # .studio_pro_category:str
+    # .studio_category:str
+    # .supported_platform:str
+    # .offline_capable:bool
+    # .help_url:str
+    pass
+
+@MendixMap("Pages$WidgetObjectType")
+class Pages_WidgetObjectType(MendixElement):
+    # .property_types:List[Pages_WidgetPropertyType]
+    pass
+
+@MendixMap("Pages$WidgetPropertyType")
+class Pages_WidgetPropertyType(MendixElement):
+    # .value_type:Pages_WidgetValueType
+    # .key:str
+    # .category:str
+    # .caption:str
+    # .description:str
+    # .is_default:bool
+    pass
+
+@MendixMap("Pages$WidgetValueType")
+class Pages_WidgetValueType(MendixElement):
+    # .enumeration_values:List[Pages_WidgetEnumerationValue]
+    # .return_type:Pages_WidgetReturnType
+    # .type:str
+    # .is_list:bool
+    # .is_linked:bool
+    # .is_meta_data:bool
+    # .allow_non_persistable_entities:bool
+    # .is_path:str
+    # .path_type:str
+    # .parameter_is_list:bool
+    # .multiline:bool
+    # .default_value:str
+    # .required:bool
+    # .set_label:bool
+    # .default_type:str
+    pass
+
+@MendixMap("Pages$WidgetEnumerationValue")
+class Pages_WidgetEnumerationValue(MendixElement):
+    # .key:str
+    # .caption:str
+    pass
+
+@MendixMap("Pages$WidgetReturnType")
+class Pages_WidgetReturnType(MendixElement):
+    # .type:str
+    # .is_list:bool
+    pass
+
+@MendixMap("Pages$WidgetObject")
+class Pages_WidgetObject(MendixElement):
+    # .properties:List[Pages_WidgetProperty]
+    # .type:str
+    pass
+
+@MendixMap("Pages$WidgetProperty")
+class Pages_WidgetProperty(MendixElement):
+    # .value:Pages_WidgetValue
+    # .type:str
+    pass
+
+@MendixMap("Pages$WidgetValue")
+class Pages_WidgetValue(MendixElement):
+    # .action:Pages_ClientAction
+    # .text_template:Pages_ClientTemplate
+    # .translatable_value:Texts_Text
+    # .type:str
+    # .primitive_value:str
+    # .image:str
+    # .selection:str
+    pass
+
+# --- Actions, Templates, and Text ---
+
+@MendixMap("Pages$NoClientAction")
+class Pages_NoClientAction(Pages_ClientAction):
+    pass
+
+@MendixMap("Pages$CallNanoflowClientAction")
+class Pages_CallNanoflowClientAction(Pages_ClientAction):
+    # .nanoflow:str
+    # .progress_bar:str
+    pass
+
+@MendixMap("Pages$ClientTemplate")
+class Pages_ClientTemplate(MendixElement):
+    # .template:Texts_Text
+    # .fallback:Texts_Text
+    pass
+
+@MendixMap("Texts$Text")
+class Texts_Text(MendixElement):
+    # .translations:List[Texts_Translation]
+    pass
+
+@MendixMap("Texts$Translation")
+class Texts_Translation(MendixElement):
+    # .language_code:str
+    # .text:str
+    pass
+
+# --- Layout and Container Widgets ---
+
+@MendixMap("Pages$DivContainer")
+class Pages_DivContainer(Pages_Widget):
+    # .widgets:List[Pages_Widget]
+    # .appearance:Pages_Appearance
+    # .on_click_action:Pages_ClientAction
+    # .name:str
+    # .tab_index:int
+    # .render_mode:str
+    # .screen_reader_hidden:bool
+    pass
+
+@MendixMap("Pages$LayoutGrid")
+class Pages_LayoutGrid(Pages_Widget):
+    # .rows:List[Pages_LayoutGridRow]
+    # .appearance:Pages_Appearance
+    # .name:str
+    # .tab_index:int
+    # .width:str
+    pass
+
+@MendixMap("Pages$LayoutGridRow")
+class Pages_LayoutGridRow(MendixElement):
+    # .columns:List[Pages_LayoutGridColumn]
+    # .appearance:Pages_Appearance
+    # .vertical_alignment:str
+    # .horizontal_alignment:str
+    # .spacing_between_columns:bool
+    pass
+
+@MendixMap("Pages$LayoutGridColumn")
+class Pages_LayoutGridColumn(MendixElement):
+    # .widgets:List[Pages_Widget]
+    # .appearance:Pages_Appearance
+    # .weight:int
+    # .tablet_weight:int
+    # .phone_weight:int
+    # .preview_width:int
+    # .vertical_alignment:str
+    pass
+
+# --- Form and Interaction Widgets ---
+
+@MendixMap("Pages$DynamicText")
+class Pages_DynamicText(Pages_Widget):
+    # .content:Pages_ClientTemplate
+    # .appearance:Pages_Appearance
+    # .name:str
+    # .tab_index:int
+    # .render_mode:str
+    # .native_text_style:str
+    pass
+
+@MendixMap("Pages$ValidationMessage")
+class Pages_ValidationMessage(Pages_Widget):
+    # .appearance:Pages_Appearance
+    # .name:str
+    # .tab_index:int
+    pass
+
+@MendixMap("Pages$LoginIdTextBox")
+class Pages_LoginIdTextBox(Pages_Widget):
+    # .label:Texts_Text
+    # .placeholder:Texts_Text
+    # .appearance:Pages_Appearance
+    # .name:str
+    # .tab_index:int
+    # .label_width:int
+    pass
+
+@MendixMap("Pages$PasswordTextBox")
+class Pages_PasswordTextBox(Pages_Widget):
+    # .label:Texts_Text
+    # .placeholder:Texts_Text
+    # .appearance:Pages_Appearance
+    # .name:str
+    # .tab_index:int
+    # .label_width:int
+    pass
+
+@MendixMap("Pages$IconCollectionIcon")
+class Pages_IconCollectionIcon(Pages_Icon):
+    # .image:str
+    pass
+
+@MendixMap("Pages$ActionButton")
+class Pages_ActionButton(Pages_Widget):
+    # .caption:Pages_ClientTemplate
+    # .tooltip:Texts_Text
+    # .icon:Pages_Icon
+    # .action:Pages_ClientAction
+    # .appearance:Pages_Appearance
+    # .name:str
+    # .tab_index:int
+    # .render_type:str
+    # .button_style:str
+    # .aria_role:str
+    pass
+
+@MendixMap("Pages$LoginButton")
+class Pages_LoginButton(Pages_Widget):
+    # .caption:Pages_ClientTemplate
+    # .tooltip:Texts_Text
+    # .appearance:Pages_Appearance
+    # .name:str
+    # .tab_index:int
+    # .render_type:str
+    # .button_style:str
+    # .validation_message_widget:str
+    pass
+@MendixMap("Pages$Layout")
+class Pages_Layout(MendixElement):
+    # .name:str
+    # .documentation:str
+    # .excluded:bool
+    # .export_level:str (Enum: Hidden/Public...)
+    # .canvas_width:int
+    # .canvas_height:int
+    # .content:Pages_WebLayoutContent
+    pass
+
+@MendixMap("Pages$WebLayoutContent")
+class Pages_WebLayoutContent(MendixElement):
+    # .layout_type:str (Enum: Responsive/Legacy...)
+    # .layout_call:MendixElement
+    # .widgets:List[MendixElement]
+    pass
+
+@MendixMap("Pages$SnippetCallWidget")
+class Pages_SnippetCallWidget(MendixElement):
+    # .name:str
+    # .tab_index:int
+    # .appearance:Pages_Appearance
+    # .snippet_call:Pages_SnippetCall
+    pass
+
+@MendixMap("Pages$Placeholder")
+class Pages_Placeholder(MendixElement):
+    # .name:str
+    # .tab_index:int
+    # .appearance:Pages_Appearance
+    pass
+
+@MendixMap("Pages$Appearance")
+class Pages_Appearance(MendixElement):
+    # .class:str
+    # .style:str
+    # .dynamic_classes:str (Expression)
+    # .design_properties:List
+    pass
+
+@MendixMap("Pages$SnippetCall")
+class Pages_SnippetCall(MendixElement):
+    # .parameter_mappings:List
+    # .snippet:str (Qualified Name)
+    pass
+#endregion
+
+#region 2.1 Texts
+#endregion
+
+#region 2.1 Projects
 #endregion
 
 #region 2.1 Projects
@@ -462,6 +840,48 @@ class MicroflowAnalyzer:
 
         self.ctx.log(f"'''")
 
+class PageAnalyzer:
+    def __init__(self, context):
+        self.ctx = context
+
+    def execute(self, module_name, page_name):
+        module = self.ctx.find_module(module_name)
+        if not module: return
+        
+        # 在模块中查找页面
+        raw_page = next((p for p in module._raw.GetUnitsOfType("Pages$Page") if p.Name == page_name), None)
+        if not raw_page:
+            self.ctx.log(f"❌ Page not found: {module_name}.{page_name}")
+            return
+
+        page = ElementFactory.create(raw_page, self.ctx)
+        self.ctx.log(f"# PAGE: {module_name}.{page.name}\n")
+        
+        # 遍历布局插槽 (Layout Arguments) 中的组件
+        if page.layout_call:
+            for arg in page.layout_call.arguments:
+                self.ctx.log(f"## Placeholder: {arg.parameter}")
+                for widget in arg.widgets:
+                    self._render_widget(widget, 1)
+
+    def _render_widget(self, w, indent):
+        # 获取组件基本信息
+        name_str = f" ({w.name})" if hasattr(w, "name") and w.name else ""
+        self.ctx.log(f"- [{w.type_name}]{name_str}", indent)
+
+        # 递归处理容器类组件
+        # 1. 通用 widgets 列表 (DivContainer, ScrollContainer 等)
+        if hasattr(w, "widgets"):
+            for child in w.widgets: self._render_widget(child, indent + 1)
+        # 2. 布局表格 (LayoutGrid)
+        elif hasattr(w, "rows"):
+            for row in w.rows:
+                for col in row.columns:
+                    for child in col.widgets: self._render_widget(child, indent + 1)
+        # 3. 列表/数据容器 (ListView, DataView)
+        elif hasattr(w, "contents") and w.type_name in ["ListView", "DataView", "TemplateGrid"]:
+            for child in w.contents.widgets: self._render_widget(child, indent + 1)
+
 #endregion
 
 #region 4. 执行入口 (Execution)
@@ -476,7 +896,8 @@ try:
     MicroflowAnalyzer(ctx).execute(
         "AltairIntegration", "Tool_SparqlConverter"
     )  # 替换为你的微流
-
+    # 分析页面
+    PageAnalyzer(ctx).execute("Evora_UI", "Login")
     # --- 获取分析报告内容 ---
     final_report = ctx.flush_logs()
 
