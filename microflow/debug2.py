@@ -10,6 +10,7 @@ from Mendix.StudioPro.ExtensionsAPI.Model.UntypedModel import PropertyType
 # 1. 核心框架 (Core Framework)
 # ==============================================================================
 
+#region 1. 核心框架 (Core Framework)
 _MENDIX_TYPE_REGISTRY = {}
 
 
@@ -155,14 +156,11 @@ class MendixElement:
     def __str__(self):
         return self.get_summary()
 
+#endregion
 
-# ==============================================================================
-# 2. 类型定义 (Wrapper Classes)
-# ==============================================================================
+#region 2. 类型定义 (Wrapper Classes)
 
-# --- Domain Model 层 ---
-
-
+#region 2.1 Projects
 @MendixMap("Projects$Module")
 class Projects_Module(MendixElement):
     def get_domain_model(self):
@@ -179,8 +177,8 @@ class Projects_Module(MendixElement):
             None,
         )
         return ElementFactory.create(raw_mf, self.ctx)
-
-
+#endregion
+#region 2.1 DomainModels
 @MendixMap("DomainModels$Entity")
 class DomainModels_Entity(MendixElement):
     def is_persistable(self):
@@ -217,10 +215,57 @@ class DomainModels_AssociationOwner(MendixElement):
 class DomainModels_AssociationCapabilities(MendixElement):
     def __str__(self): return self.type_name
 
+# --- 属性类型定义 (Attribute Types) ---
+@MendixMap("DomainModels$Attribute")
+class DomainModels_Attribute(MendixElement):
+    def get_summary(self):
+        doc = f" // {self.documentation}" if self.documentation else ""
+        return f"- {self.name}: {self.type}{doc}"
 
-# --- 微流动作层 (Microflow Actions) ---
+
+@MendixMap("DomainModels$EnumerationAttributeType")
+class DomainModels_EnumerationAttributeType(MendixElement):
+    def __str__(self):
+        # enumeration 是属性，返回枚举的全名
+        return f"Enum({self.enumeration})"
 
 
+@MendixMap("DomainModels$StringAttributeType")
+class DomainModels_StringAttributeType(MendixElement):
+    def __str__(self):
+        return f"String({self.length if self.length > 0 else 'Unlimited'})"
+
+
+@MendixMap("DomainModels$IntegerAttributeType")
+class DomainModels_IntegerAttributeType(MendixElement):
+    def __str__(self):
+        return "Integer"
+
+
+@MendixMap("DomainModels$DateTimeAttributeType")
+class DomainModels_DateTimeAttributeType(MendixElement):
+    def __str__(self):
+        return "DateTime"
+
+
+@MendixMap("DomainModels$BooleanAttributeType")
+class DomainModels_BooleanAttributeType(MendixElement):
+    def __str__(self):
+        return "Boolean"
+
+
+@MendixMap("DomainModels$DecimalAttributeType")
+class DomainModels_DecimalAttributeType(MendixElement):
+    def __str__(self):
+        return "Decimal"
+
+
+@MendixMap("DomainModels$LongAttributeType")
+class DomainModels_LongAttributeType(MendixElement):
+    def __str__(self):
+        return "Long"
+#endregion
+#region 2.1 Microflows
 @MendixMap("Microflows$ActionActivity")
 class Microflows_ActionActivity(MendixElement):
     def get_summary(self):
@@ -283,7 +328,8 @@ class Microflows_EndEvent(MendixElement):
         ret = f" (Return: {self.return_value})" if self.return_value else ""
         return f"🛑 End{ret}"
 
-
+#endregion
+#region 2.1 DataTypes
 # --- 数据类型定义 ---
 @MendixMap("DataTypes$StringType")
 class DataTypes_StringType(MendixElement):
@@ -301,64 +347,17 @@ class DataTypes_VoidType(MendixElement):
 class DataTypes_BooleanType(MendixElement):
     def __str__(self):
         return "Boolean"
+#endregion
 
+#region 2.1 Pages
+#endregion
 
-# --- 属性类型定义 (Attribute Types) ---
-@MendixMap("DomainModels$Attribute")
-class DomainModels_Attribute(MendixElement):
-    def get_summary(self):
-        doc = f" // {self.documentation}" if self.documentation else ""
-        return f"- {self.name}: {self.type}{doc}"
+#region 2.1 Projects
+#endregion
 
+#endregion
 
-@MendixMap("DomainModels$EnumerationAttributeType")
-class DomainModels_EnumerationAttributeType(MendixElement):
-    def __str__(self):
-        # enumeration 是属性，返回枚举的全名
-        return f"Enum({self.enumeration})"
-
-
-@MendixMap("DomainModels$StringAttributeType")
-class DomainModels_StringAttributeType(MendixElement):
-    def __str__(self):
-        return f"String({self.length if self.length > 0 else 'Unlimited'})"
-
-
-@MendixMap("DomainModels$IntegerAttributeType")
-class DomainModels_IntegerAttributeType(MendixElement):
-    def __str__(self):
-        return "Integer"
-
-
-@MendixMap("DomainModels$DateTimeAttributeType")
-class DomainModels_DateTimeAttributeType(MendixElement):
-    def __str__(self):
-        return "DateTime"
-
-
-@MendixMap("DomainModels$BooleanAttributeType")
-class DomainModels_BooleanAttributeType(MendixElement):
-    def __str__(self):
-        return "Boolean"
-
-
-@MendixMap("DomainModels$DecimalAttributeType")
-class DomainModels_DecimalAttributeType(MendixElement):
-    def __str__(self):
-        return "Decimal"
-
-
-@MendixMap("DomainModels$LongAttributeType")
-class DomainModels_LongAttributeType(MendixElement):
-    def __str__(self):
-        return "Long"
-
-
-# ==============================================================================
-# 3. 业务逻辑层 (Business Logic)
-# ==============================================================================
-
-
+#region 3. 业务逻辑层 (Business Logic)
 class DomainModelAnalyzer:
     def __init__(self, context):
         self.ctx = context
@@ -400,7 +399,7 @@ class DomainModelAnalyzer:
             for assoc in dm.cross_associations:
                 self.ctx.log(assoc.get_info(id_map))
             self.ctx.log("")
-            
+
 class MicroflowAnalyzer:
     def __init__(self, context):
         self.ctx = context
@@ -463,10 +462,9 @@ class MicroflowAnalyzer:
 
         self.ctx.log(f"'''")
 
-# ==============================================================================
-# 4. 执行入口 (Execution)
-# ==============================================================================
+#endregion
 
+#region 4. 执行入口 (Execution)
 try:
     PostMessage("backend:clear", "")
     ctx = MendixContext(currentApp, root)
@@ -513,3 +511,4 @@ try:
 
 except Exception as e:
     PostMessage("backend:error", f"Error: {str(e)}\n{traceback.format_exc()}")
+#endregion
