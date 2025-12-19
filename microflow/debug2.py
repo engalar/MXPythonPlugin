@@ -10,7 +10,7 @@ from Mendix.StudioPro.ExtensionsAPI.Model.UntypedModel import PropertyType
 # 1. 核心框架 (Core Framework)
 # ==============================================================================
 
-#region 1. 核心框架 (Core Framework)
+# region 1. 核心框架 (Core Framework)
 _MENDIX_TYPE_REGISTRY = {}
 
 
@@ -27,7 +27,7 @@ def MendixMap(mendix_type_str):
 class MendixContext:
     """运行上下文：负责日志管理、全局搜索缓存和 Unit 查找"""
 
-    def __init__(self,model, root_node):
+    def __init__(self, model, root_node):
         self.root = root_node
         self.model = model
         self.log_buffer = []
@@ -156,11 +156,13 @@ class MendixElement:
     def __str__(self):
         return self.get_summary()
 
-#endregion
 
-#region 2. 类型定义 (Wrapper Classes)
+# endregion
 
-#region 2.1 Projects
+# region 2. 类型定义 (Wrapper Classes)
+
+
+# region 2.1 Projects
 @MendixMap("Projects$Module")
 class Projects_Module(MendixElement):
     def get_domain_model(self):
@@ -177,6 +179,7 @@ class Projects_Module(MendixElement):
             None,
         )
         return ElementFactory.create(raw_mf, self.ctx)
+
     def find_workflow(self, workflow_name):
         raw_wf = next(
             (
@@ -187,8 +190,10 @@ class Projects_Module(MendixElement):
             None,
         )
         return ElementFactory.create(raw_wf, self.ctx)
-#endregion
-#region 2.1 DomainModels
+
+
+# endregion
+# region 2.1 DomainModels
 @MendixMap("DomainModels$Entity")
 class DomainModels_Entity(MendixElement):
     def is_persistable(self):
@@ -203,12 +208,14 @@ class DomainModels_Entity(MendixElement):
         parent = self.ctx.find_entity_by_qname(parent_qname)
         return parent.is_persistable() if parent and parent.is_valid else True
 
+
 @MendixMap("DomainModels$Association")
 class DomainModels_Association(MendixElement):
     def get_info(self, lookup):
         p_name = lookup.get(str(self.parent), "Unknown")
         c_name = lookup.get(str(self.child), "Unknown")
         return f"- [Assoc] {self.name}: {p_name} -> {c_name} [Type:{self.type}, Owner:{self.owner}]"
+
 
 @MendixMap("DomainModels$CrossAssociation")
 class DomainModels_CrossAssociation(MendixElement):
@@ -217,13 +224,18 @@ class DomainModels_CrossAssociation(MendixElement):
         # CrossAssociation 的 child 属性通常已经是字符串全名
         return f"- [Cross] {self.name}: {p_name} -> {self.child} [Type:{self.type}, Owner:{self.owner}]"
 
+
 @MendixMap("DomainModels$AssociationOwner")
 class DomainModels_AssociationOwner(MendixElement):
-    def __str__(self): return self.type_name
+    def __str__(self):
+        return self.type_name
+
 
 @MendixMap("DomainModels$AssociationCapabilities")
 class DomainModels_AssociationCapabilities(MendixElement):
-    def __str__(self): return self.type_name
+    def __str__(self):
+        return self.type_name
+
 
 # --- 属性类型定义 (Attribute Types) ---
 @MendixMap("DomainModels$Attribute")
@@ -274,8 +286,10 @@ class DomainModels_DecimalAttributeType(MendixElement):
 class DomainModels_LongAttributeType(MendixElement):
     def __str__(self):
         return "Long"
-#endregion
-#region 2.1 Microflows
+
+
+# endregion
+# region 2.1 Microflows
 @MendixMap("Microflows$ActionActivity")
 class Microflows_ActionActivity(MendixElement):
     def get_summary(self):
@@ -315,7 +329,9 @@ class Microflows_RetrieveAction(MendixElement):
 class Microflows_CreateVariableAction(MendixElement):
     def get_summary(self):
         value_format = self.initial_value.replace("\n", "\\n")
-        return f"💎 Create: ${self.variable_name} ({self.variable_type}) = {value_format}"
+        return (
+            f"💎 Create: ${self.variable_name} ({self.variable_type}) = {value_format}"
+        )
 
 
 @MendixMap("Microflows$ChangeVariableAction")
@@ -338,8 +354,9 @@ class Microflows_EndEvent(MendixElement):
         ret = f" (Return: {self.return_value})" if self.return_value else ""
         return f"🛑 End{ret}"
 
-#endregion
-#region 2.1 DataTypes
+
+# endregion
+# region 2.1 DataTypes
 # --- 数据类型定义 ---
 @MendixMap("DataTypes$StringType")
 class DataTypes_StringType(MendixElement):
@@ -357,34 +374,42 @@ class DataTypes_VoidType(MendixElement):
 class DataTypes_BooleanType(MendixElement):
     def __str__(self):
         return "Boolean"
-#endregion
 
-#region 2.1 Pages
+
+# endregion
+
+# region 2.1 Pages
 from typing import List, Optional
 
 # Base Classes for Polymorphism
+
 
 @MendixMap("Pages$Widget")
 class Pages_Widget(MendixElement):
     # Base class for all widgets
     pass
 
+
 @MendixMap("Pages$ClientAction")
 class Pages_ClientAction(MendixElement):
     # .disabled_during_execution:bool
     pass
+
 
 @MendixMap("Pages$DesignPropertyValue")
 class Pages_DesignPropertyValue(MendixElement):
     # Base class for design properties
     pass
 
+
 @MendixMap("Pages$Icon")
 class Pages_Icon(MendixElement):
     # Base class for icons
     pass
 
+
 # --- Core Page Structure ---
+
 
 @MendixMap("Pages$Page")
 class Pages_Page(MendixElement):
@@ -404,11 +429,13 @@ class Pages_Page(MendixElement):
     # .mark_as_used:bool
     pass
 
+
 @MendixMap("Pages$LayoutCall")
 class Pages_LayoutCall(MendixElement):
     # .arguments:List[Pages_LayoutCallArgument]
     # .layout:str
     pass
+
 
 @MendixMap("Pages$LayoutCallArgument")
 class Pages_LayoutCallArgument(MendixElement):
@@ -416,13 +443,16 @@ class Pages_LayoutCallArgument(MendixElement):
     # .parameter:str
     pass
 
+
 @MendixMap("Pages$Appearance")
 class Pages_Appearance(MendixElement):
     # .class_:str
     # .design_properties:List[Pages_DesignPropertyValue]
     pass
 
+
 # --- Design Properties ---
+
 
 @MendixMap("Pages$OptionDesignPropertyValue")
 class Pages_OptionDesignPropertyValue(Pages_DesignPropertyValue):
@@ -430,10 +460,12 @@ class Pages_OptionDesignPropertyValue(Pages_DesignPropertyValue):
     # .key:str
     pass
 
+
 @MendixMap("Pages$ToggleDesignPropertyValue")
 class Pages_ToggleDesignPropertyValue(Pages_DesignPropertyValue):
     # .key:str
     pass
+
 
 @MendixMap("Pages$CompoundDesignPropertyValue")
 class Pages_CompoundDesignPropertyValue(Pages_DesignPropertyValue):
@@ -441,7 +473,9 @@ class Pages_CompoundDesignPropertyValue(Pages_DesignPropertyValue):
     # .key:str
     pass
 
+
 # --- Custom Widget Metamodel ---
+
 
 @MendixMap("Pages$CustomWidget")
 class Pages_CustomWidget(Pages_Widget):
@@ -462,6 +496,7 @@ class Pages_CustomWidget(Pages_Widget):
     # .help_url:str
     pass
 
+
 @MendixMap("Pages$CustomWidgetType")
 class Pages_CustomWidgetType(MendixElement):
     # .object_type:Pages_WidgetObjectType
@@ -477,10 +512,12 @@ class Pages_CustomWidgetType(MendixElement):
     # .help_url:str
     pass
 
+
 @MendixMap("Pages$WidgetObjectType")
 class Pages_WidgetObjectType(MendixElement):
     # .property_types:List[Pages_WidgetPropertyType]
     pass
+
 
 @MendixMap("Pages$WidgetPropertyType")
 class Pages_WidgetPropertyType(MendixElement):
@@ -491,6 +528,7 @@ class Pages_WidgetPropertyType(MendixElement):
     # .description:str
     # .is_default:bool
     pass
+
 
 @MendixMap("Pages$WidgetValueType")
 class Pages_WidgetValueType(MendixElement):
@@ -511,11 +549,13 @@ class Pages_WidgetValueType(MendixElement):
     # .default_type:str
     pass
 
+
 @MendixMap("Pages$WidgetEnumerationValue")
 class Pages_WidgetEnumerationValue(MendixElement):
     # .key:str
     # .caption:str
     pass
+
 
 @MendixMap("Pages$WidgetReturnType")
 class Pages_WidgetReturnType(MendixElement):
@@ -523,17 +563,20 @@ class Pages_WidgetReturnType(MendixElement):
     # .is_list:bool
     pass
 
+
 @MendixMap("Pages$WidgetObject")
 class Pages_WidgetObject(MendixElement):
     # .properties:List[Pages_WidgetProperty]
     # .type:str
     pass
 
+
 @MendixMap("Pages$WidgetProperty")
 class Pages_WidgetProperty(MendixElement):
     # .value:Pages_WidgetValue
     # .type:str
     pass
+
 
 @MendixMap("Pages$WidgetValue")
 class Pages_WidgetValue(MendixElement):
@@ -546,11 +589,14 @@ class Pages_WidgetValue(MendixElement):
     # .selection:str
     pass
 
+
 # --- Actions, Templates, and Text ---
+
 
 @MendixMap("Pages$NoClientAction")
 class Pages_NoClientAction(Pages_ClientAction):
     pass
+
 
 @MendixMap("Pages$CallNanoflowClientAction")
 class Pages_CallNanoflowClientAction(Pages_ClientAction):
@@ -558,16 +604,19 @@ class Pages_CallNanoflowClientAction(Pages_ClientAction):
     # .progress_bar:str
     pass
 
+
 @MendixMap("Pages$ClientTemplate")
 class Pages_ClientTemplate(MendixElement):
     # .template:Texts_Text
     # .fallback:Texts_Text
     pass
 
+
 @MendixMap("Texts$Text")
 class Texts_Text(MendixElement):
     # .translations:List[Texts_Translation]
     pass
+
 
 @MendixMap("Texts$Translation")
 class Texts_Translation(MendixElement):
@@ -575,7 +624,9 @@ class Texts_Translation(MendixElement):
     # .text:str
     pass
 
+
 # --- Layout and Container Widgets ---
+
 
 @MendixMap("Pages$DivContainer")
 class Pages_DivContainer(Pages_Widget):
@@ -588,6 +639,7 @@ class Pages_DivContainer(Pages_Widget):
     # .screen_reader_hidden:bool
     pass
 
+
 @MendixMap("Pages$LayoutGrid")
 class Pages_LayoutGrid(Pages_Widget):
     # .rows:List[Pages_LayoutGridRow]
@@ -597,6 +649,7 @@ class Pages_LayoutGrid(Pages_Widget):
     # .width:str
     pass
 
+
 @MendixMap("Pages$LayoutGridRow")
 class Pages_LayoutGridRow(MendixElement):
     # .columns:List[Pages_LayoutGridColumn]
@@ -605,6 +658,7 @@ class Pages_LayoutGridRow(MendixElement):
     # .horizontal_alignment:str
     # .spacing_between_columns:bool
     pass
+
 
 @MendixMap("Pages$LayoutGridColumn")
 class Pages_LayoutGridColumn(MendixElement):
@@ -617,7 +671,9 @@ class Pages_LayoutGridColumn(MendixElement):
     # .vertical_alignment:str
     pass
 
+
 # --- Form and Interaction Widgets ---
+
 
 @MendixMap("Pages$DynamicText")
 class Pages_DynamicText(Pages_Widget):
@@ -629,12 +685,14 @@ class Pages_DynamicText(Pages_Widget):
     # .native_text_style:str
     pass
 
+
 @MendixMap("Pages$ValidationMessage")
 class Pages_ValidationMessage(Pages_Widget):
     # .appearance:Pages_Appearance
     # .name:str
     # .tab_index:int
     pass
+
 
 @MendixMap("Pages$LoginIdTextBox")
 class Pages_LoginIdTextBox(Pages_Widget):
@@ -646,6 +704,7 @@ class Pages_LoginIdTextBox(Pages_Widget):
     # .label_width:int
     pass
 
+
 @MendixMap("Pages$PasswordTextBox")
 class Pages_PasswordTextBox(Pages_Widget):
     # .label:Texts_Text
@@ -656,10 +715,12 @@ class Pages_PasswordTextBox(Pages_Widget):
     # .label_width:int
     pass
 
+
 @MendixMap("Pages$IconCollectionIcon")
 class Pages_IconCollectionIcon(Pages_Icon):
     # .image:str
     pass
+
 
 @MendixMap("Pages$ActionButton")
 class Pages_ActionButton(Pages_Widget):
@@ -675,6 +736,7 @@ class Pages_ActionButton(Pages_Widget):
     # .aria_role:str
     pass
 
+
 @MendixMap("Pages$LoginButton")
 class Pages_LoginButton(Pages_Widget):
     # .caption:Pages_ClientTemplate
@@ -686,6 +748,8 @@ class Pages_LoginButton(Pages_Widget):
     # .button_style:str
     # .validation_message_widget:str
     pass
+
+
 @MendixMap("Pages$Layout")
 class Pages_Layout(MendixElement):
     # .name:str
@@ -697,12 +761,14 @@ class Pages_Layout(MendixElement):
     # .content:Pages_WebLayoutContent
     pass
 
+
 @MendixMap("Pages$WebLayoutContent")
 class Pages_WebLayoutContent(MendixElement):
     # .layout_type:str (Enum: Responsive/Legacy...)
     # .layout_call:MendixElement
     # .widgets:List[MendixElement]
     pass
+
 
 @MendixMap("Pages$SnippetCallWidget")
 class Pages_SnippetCallWidget(MendixElement):
@@ -712,12 +778,14 @@ class Pages_SnippetCallWidget(MendixElement):
     # .snippet_call:Pages_SnippetCall
     pass
 
+
 @MendixMap("Pages$Placeholder")
 class Pages_Placeholder(MendixElement):
     # .name:str
     # .tab_index:int
     # .appearance:Pages_Appearance
     pass
+
 
 @MendixMap("Pages$Appearance")
 class Pages_Appearance(MendixElement):
@@ -727,26 +795,31 @@ class Pages_Appearance(MendixElement):
     # .design_properties:List
     pass
 
+
 @MendixMap("Pages$SnippetCall")
 class Pages_SnippetCall(MendixElement):
     # .parameter_mappings:List
     # .snippet:str (Qualified Name)
     pass
-#endregion
 
-#region 2.1 Texts
-#endregion
 
-#region 2.1 Workflows
+# endregion
+
+# region 2.1 Texts
+# endregion
+
+# region 2.1 Workflows
 
 from typing import List
 
 # --- Microflows Module ---
 
+
 @MendixMap("Microflows$StringTemplate")
 class Microflows_StringTemplate(MendixElement):
     # .text:str
     pass
+
 
 @MendixMap("Microflows$Annotation")
 class Microflows_Annotation(MendixElement):
@@ -756,12 +829,14 @@ class Microflows_Annotation(MendixElement):
 
 # --- Pages Module ---
 
+
 @MendixMap("Pages$PageReference")
 class Pages_PageReference(MendixElement):
     pass
 
 
 # --- Workflows Module ---
+
 
 @MendixMap("Workflows$Workflow")
 class Workflows_Workflow(MendixElement):
@@ -776,20 +851,24 @@ class Workflows_Workflow(MendixElement):
     # .title:str
     pass
 
+
 @MendixMap("Workflows$WorkflowParameter")
 class Workflows_WorkflowParameter(MendixElement):
     # .name:str
     # .entity:str
     pass
 
+
 @MendixMap("Workflows$Flow")
 class Workflows_Flow(MendixElement):
     # .activities:List[MendixElement]
     pass
 
+
 @MendixMap("Workflows$XPathBasedUserSource")
 class Workflows_XPathBasedUserSource(MendixElement):
     pass
+
 
 @MendixMap("Workflows$UserTaskOutcome")
 class Workflows_UserTaskOutcome(MendixElement):
@@ -798,9 +877,11 @@ class Workflows_UserTaskOutcome(MendixElement):
     # .value:str
     pass
 
+
 @MendixMap("Workflows$NoEvent")
 class Workflows_NoEvent(MendixElement):
     pass
+
 
 @MendixMap("Workflows$SingleUserTaskActivity")
 class Workflows_SingleUserTaskActivity(MendixElement):
@@ -816,13 +897,16 @@ class Workflows_SingleUserTaskActivity(MendixElement):
     # .auto_assign_single_target_user:bool
     pass
 
+
 @MendixMap("Workflows$AllUserInput")
 class Workflows_AllUserInput(MendixElement):
     pass
 
+
 @MendixMap("Workflows$ConsensusCompletionCriteria")
 class Workflows_ConsensusCompletionCriteria(MendixElement):
     pass
+
 
 @MendixMap("Workflows$MultiUserTaskActivity")
 class Workflows_MultiUserTaskActivity(MendixElement):
@@ -841,12 +925,14 @@ class Workflows_MultiUserTaskActivity(MendixElement):
     # .await_all_users:bool
     pass
 
+
 @MendixMap("Workflows$BooleanConditionOutcome")
 class Workflows_BooleanConditionOutcome(MendixElement):
     # .flow:Workflows_Flow
     # .persistent_id:str
     # .value:str
     pass
+
 
 @MendixMap("Workflows$ExclusiveSplitActivity")
 class Workflows_ExclusiveSplitActivity(MendixElement):
@@ -857,11 +943,13 @@ class Workflows_ExclusiveSplitActivity(MendixElement):
     # .expression:str
     pass
 
+
 @MendixMap("Workflows$ParallelSplitOutcome")
 class Workflows_ParallelSplitOutcome(MendixElement):
     # .flow:Workflows_Flow
     # .persistent_id:str
     pass
+
 
 @MendixMap("Workflows$ParallelSplitActivity")
 class Workflows_ParallelSplitActivity(MendixElement):
@@ -871,12 +959,14 @@ class Workflows_ParallelSplitActivity(MendixElement):
     # .caption:str
     pass
 
+
 @MendixMap("Workflows$WaitForNotificationActivity")
 class Workflows_WaitForNotificationActivity(MendixElement):
     # .persistent_id:str
     # .name:str
     # .caption:str
     pass
+
 
 @MendixMap("Workflows$WaitForTimerActivity")
 class Workflows_WaitForTimerActivity(MendixElement):
@@ -887,6 +977,7 @@ class Workflows_WaitForTimerActivity(MendixElement):
     # .delay:str
     pass
 
+
 @MendixMap("Workflows$CallWorkflowActivity")
 class Workflows_CallWorkflowActivity(MendixElement):
     # .persistent_id:str
@@ -895,31 +986,37 @@ class Workflows_CallWorkflowActivity(MendixElement):
     # .execute_async:bool
     pass
 
+
 @MendixMap("Workflows$CallMicroflowTask")
 class Workflows_CallMicroflowTask(MendixElement):
     # .persistent_id:str
     # .name:str
     # .caption:str
     pass
-#endregion
 
-#region 2.1 Projects
-#endregion
 
-#endregion
+# endregion
 
-#region 3. 业务逻辑层 (Business Logic)
+# region 2.1 Projects
+# endregion
+
+# endregion
+
+
+# region 3. 业务逻辑层 (Business Logic)
 class DomainModelAnalyzer:
     def __init__(self, context):
         self.ctx = context
 
     def execute(self, module_name):
         module = self.ctx.find_module(module_name)
-        if not module: return
-        
+        if not module:
+            return
+
         self.ctx.log(f"# DOMAIN MODEL: {module.name}\n")
         dm = module.get_domain_model()
-        if not dm.is_valid: return
+        if not dm.is_valid:
+            return
 
         # 构建局部 Lookup Table，避免全局耦合
         id_map = {}
@@ -928,12 +1025,17 @@ class DomainModelAnalyzer:
         for ent in dm.entities:
             # 记录 ID 到全名的映射
             id_map[ent.id] = f"{module.name}.{ent.name}"
-            
+
             p_tag = " [P]" if ent.is_persistable() else " [NP]"
-            gen_info = f" extends {ent.generalization.generalization}" if ent.generalization.type_name == "Generalization" else ""
+            gen_info = (
+                f" extends {ent.generalization.generalization}"
+                if ent.generalization.type_name == "Generalization"
+                else ""
+            )
             self.ctx.log(f"## Entity: {ent.name}{p_tag}{gen_info}")
-            
-            if ent.documentation: self.ctx.log(f"> {ent.documentation}")
+
+            if ent.documentation:
+                self.ctx.log(f"> {ent.documentation}")
             for attr in ent.attributes:
                 self.ctx.log(attr.get_summary(), indent=1)
             self.ctx.log("")
@@ -950,6 +1052,7 @@ class DomainModelAnalyzer:
             for assoc in dm.cross_associations:
                 self.ctx.log(assoc.get_info(id_map))
             self.ctx.log("")
+
 
 class MicroflowAnalyzer:
     def __init__(self, context):
@@ -1013,23 +1116,32 @@ class MicroflowAnalyzer:
 
         self.ctx.log(f"'''")
 
+
 class PageAnalyzer:
     def __init__(self, context):
         self.ctx = context
 
     def execute(self, module_name, page_name):
         module = self.ctx.find_module(module_name)
-        if not module: return
-        
+        if not module:
+            return
+
         # 在模块中查找页面
-        raw_page = next((p for p in module._raw.GetUnitsOfType("Pages$Page") if p.Name == page_name), None)
+        raw_page = next(
+            (
+                p
+                for p in module._raw.GetUnitsOfType("Pages$Page")
+                if p.Name == page_name
+            ),
+            None,
+        )
         if not raw_page:
             self.ctx.log(f"❌ Page not found: {module_name}.{page_name}")
             return
 
         page = ElementFactory.create(raw_page, self.ctx)
         self.ctx.log(f"# PAGE: {module_name}.{page.name}\n")
-        
+
         # 遍历布局插槽 (Layout Arguments) 中的组件
         if page.layout_call:
             for arg in page.layout_call.arguments:
@@ -1045,15 +1157,23 @@ class PageAnalyzer:
         # 递归处理容器类组件
         # 1. 通用 widgets 列表 (DivContainer, ScrollContainer 等)
         if hasattr(w, "widgets"):
-            for child in w.widgets: self._render_widget(child, indent + 1)
+            for child in w.widgets:
+                self._render_widget(child, indent + 1)
         # 2. 布局表格 (LayoutGrid)
         elif hasattr(w, "rows"):
             for row in w.rows:
                 for col in row.columns:
-                    for child in col.widgets: self._render_widget(child, indent + 1)
+                    for child in col.widgets:
+                        self._render_widget(child, indent + 1)
         # 3. 列表/数据容器 (ListView, DataView)
-        elif hasattr(w, "contents") and w.type_name in ["ListView", "DataView", "TemplateGrid"]:
-            for child in w.contents.widgets: self._render_widget(child, indent + 1)
+        elif hasattr(w, "contents") and w.type_name in [
+            "ListView",
+            "DataView",
+            "TemplateGrid",
+        ]:
+            for child in w.contents.widgets:
+                self._render_widget(child, indent + 1)
+
 
 class WorkflowAnalyzer:
     def __init__(self, context):
@@ -1061,18 +1181,21 @@ class WorkflowAnalyzer:
 
     def execute(self, module_name, wf_name):
         module = self.ctx.find_module(module_name)
-        if not module: return
+        if not module:
+            return
         wf = module.find_workflow(wf_name)
         if not wf or not wf.is_valid:
             self.ctx.log(f"❌ Workflow not found: {module_name}.{wf_name}")
             return
 
-        self.ctx.log(f"# WORKFLOW: {module_name}.{wf.name}\n")
+        self.ctx.log(f"# WORKFLOW: {module_name}.{wf.name}\n```")
         self._render_flow(wf.flow, 0)
+        self.ctx.log(f"```")
 
     def _render_flow(self, flow, indent):
-        if not flow or not flow.is_valid: return
-        
+        if not flow or not flow.is_valid:
+            return
+
         for act in flow.activities:
             # 获取标题和名称
             caption = act.caption if hasattr(act, "caption") else ""
@@ -1081,15 +1204,20 @@ class WorkflowAnalyzer:
 
             # 递归处理分支 (Outcomes)
             if hasattr(act, "outcomes"):
+                # 仅一个outcome且activities为空,可视为无outcome
+                if len(act.outcomes)==1 and len(act.outcomes[0].flow.activities) == 0:
+                    continue
                 for outcome in act.outcomes:
                     val = getattr(outcome, "value", "Outcome")
                     self.ctx.log(f" └─ Case: {val}", indent)
                     # 如果分支有后续 Flow，递归打印
                     if hasattr(outcome, "flow"):
                         self._render_flow(outcome.flow, indent + 2)
-#endregion
 
-#region 4. 执行入口 (Execution)
+
+# endregion
+
+# region 4. 执行入口 (Execution)
 try:
     PostMessage("backend:clear", "")
     ctx = MendixContext(currentApp, root)
@@ -1139,4 +1267,4 @@ try:
 
 except Exception as e:
     PostMessage("backend:error", f"Error: {str(e)}\n{traceback.format_exc()}")
-#endregion
+# endregion
