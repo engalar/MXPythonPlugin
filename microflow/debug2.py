@@ -1,3 +1,4 @@
+import os
 import clr
 import traceback
 from System import Exception as SystemException
@@ -6,17 +7,14 @@ clr.AddReference("Mendix.StudioPro.ExtensionsAPI")
 from Mendix.StudioPro.ExtensionsAPI.Model.UntypedModel import PropertyType
 
 # ==============================================================================
-# 1. CORE FRAMEWORK: 核心框架 (动态代理 + 注册表工厂)
+# 1. 核心框架 (Core Framework)
 # ==============================================================================
 
-# 全局类型注册表: "MendixTypeString" -> PythonClass
 _MENDIX_TYPE_REGISTRY = {}
 
 
 def MendixMap(mendix_type_str):
-    """
-    [装饰器] 将 Python 类注册到工厂，绑定特定的 Mendix SDK 类型。
-    """
+    """装饰器：建立 Mendix 类型与 Python 类的映射"""
 
     def decorator(cls):
         _MENDIX_TYPE_REGISTRY[mendix_type_str] = cls
@@ -26,78 +24,76 @@ def MendixMap(mendix_type_str):
 
 
 class MendixContext:
-    def __init__(self, root_node):
+    """运行上下文：负责日志管理、全局搜索缓存和 Unit 查找"""
+
+    def __init__(self,model, root_node):
         self.root = root_node
+        self.model = model
         self.log_buffer = []
+        self._entity_qname_cache = {}
+        self._is_initialized = False
+
+    def _ensure_initialized(self):
+        if self._is_initialized:
+            return
+        # 预扫描所有模块和实体，建立 O(1) 查询表
+        modules = self.root.GetUnitsOfType("Projects$Module")
+        for mod in modules:
+            dm_units = mod.GetUnitsOfType("DomainModels$DomainModel")
+            for dm in dm_units:
+                # 注意：此处使用原始 SDK 访问以防初始化循环
+                ents = dm.GetProperty("entities").GetValues()
+                for e in ents:
+                    qname = f"{mod.Name}.{e.GetProperty('name').Value}"
+                    self._entity_qname_cache[qname] = e
+        self._is_initialized = True
 
     def log(self, msg, indent=0):
-        self.log_buffer.append(f"{'  ' * indent}{msg}")
+        prefix = "  " * indent
+        self.log_buffer.append(f"{prefix}{msg}")
 
     def flush_logs(self):
         return "\n".join(self.log_buffer)
 
     def find_module(self, module_name):
-        """查找模块并包装"""
         modules = list(self.root.GetUnitsOfType("Projects$Module"))
         raw = next((m for m in modules if m.Name == module_name), None)
         return ElementFactory.create(raw, self) if raw else None
 
     def find_entity_by_qname(self, qname):
-        """根据 'Module.Entity' 字符串查找对象"""
-        if not qname or "." not in qname:
-            return None
-        mod_name, ent_name = qname.split(".", 1)
-
-        module = self.find_module(mod_name)
-        if not module or not module.is_valid:
-            return None
-
-        # 注意：这里调用的是封装后的 domain_model 方法
-        dm = module.get_domain_model()
-        if not dm.is_valid:
-            return None
-
-        # 遍历实体 (属性访问已简化为 .entities)
-        for ent in dm.entities:
-            if ent.name == ent_name:
-                return ent
-        return None
+        self._ensure_initialized()
+        raw = self._entity_qname_cache.get(qname)
+        return ElementFactory.create(raw, self) if raw else None
 
 
 class ElementFactory:
-    """
-    [工厂模式 - 终极版] 基于注册表查表，符合开闭原则。
-    """
+    """工厂类：负责对象的动态封装"""
 
     @staticmethod
     def create(raw_obj, context):
         if raw_obj is None:
             return MendixElement(None, context)
 
-        # 处理 Python 原生基础类型 (int, str, bool)
+        # 处理基础类型
         if isinstance(raw_obj, (str, int, float, bool)):
             return raw_obj
 
-        # 获取类型字符串
         try:
-            full_type = raw_obj.Type  # e.g. "DomainModels$Entity"
+            full_type = raw_obj.Type
         except AttributeError:
-            # 无法识别的对象，返回基础封装
             return MendixElement(raw_obj, context)
 
-        # 查表实例化 (如果未注册，回退到 MendixElement)
         target_cls = _MENDIX_TYPE_REGISTRY.get(full_type, MendixElement)
         return target_cls(raw_obj, context)
 
 
 class MendixElement:
-    """
-    [通用基类] 包含动态属性映射魔法。
-    """
+    """动态代理基类：支持属性缓存、多态摘要和 snake_case 自动转换"""
 
     def __init__(self, raw_obj, context):
         self._raw = raw_obj
         self.ctx = context
+        self._cache = {}  # 性能优化：缓存属性结果
 
     @property
     def is_valid(self):
@@ -105,162 +101,227 @@ class MendixElement:
 
     @property
     def id(self):
-        return self._raw.ID.ToString() if self.is_valid else None
+        return self._raw.ID.ToString() if self.is_valid else "0"
 
     @property
     def type_name(self):
         if not self.is_valid:
-            return "Unknown"
+            return "Null"
         return self._raw.Type.split("$")[-1]
 
-    @property
-    def full_type(self):
-        return self._raw.Type if self.is_valid else "Unknown"
-
     def __getattr__(self, name):
-        """
-        核心逻辑：将 snake_case 属性访问自动映射为 Mendix CamelCase 属性获取。
-        例如: entity.domain_model -> raw.GetProperty("domainModel")
-        """
+        """核心魔法：映射 snake_case 到 CamelCase 并自动封装结果"""
         if not self.is_valid:
             return None
+        if name in self._cache:
+            return self._cache[name]
 
         # 1. 转换命名: cross_associations -> crossAssociations
-        components = name.split("_")
-        camel_name = components[0] + "".join(x.title() for x in components[1:])
+        parts = name.split("_")
+        camel_name = parts[0] + "".join(x.title() for x in parts[1:])
 
-        # 2. 调用 SDK
+        # 2. 从 SDK 获取
         prop = self._raw.GetProperty(camel_name)
-
-        # 容错：如果 camelCase 找不到，尝试直接用原始名称
         if prop is None:
-            prop = self._raw.GetProperty(name)
+            prop = self._raw.GetProperty(name)  # 备用尝试原始名
 
-        # 如果还是找不到，返回 None (或者 raise AttributeError)
         if prop is None:
-            raise AttributeError(
-                f"'{self.type_name}' object has no attribute '{name}' (mapped to '{camel_name}')"
-            )
+            raise AttributeError(f"'{self.type_name}' has no property '{name}'")
 
-        # 3. 自动装箱
+        # 3. 处理并缓存结果
         if prop.IsList:
-            return [ElementFactory.create(v, self.ctx) for v in prop.GetValues()]
+            result = [ElementFactory.create(v, self.ctx) for v in prop.GetValues()]
+        else:
+            val = prop.Value
+            if hasattr(val, "Type") or hasattr(val, "ID"):
+                result = ElementFactory.create(val, self.ctx)
+            elif isinstance(val, str):
+                result = val.replace("\r\n", "\\n").strip()
+            else:
+                result = val
 
-        val = prop.Value
+        self._cache[name] = result
+        return result
 
-        # 如果是 SDK 对象，递归封装
-        if hasattr(val, "Type") or hasattr(val, "ID"):
-            return ElementFactory.create(val, self.ctx)
-
-        # 如果是字符串，清理换行
-        if isinstance(val, str):
-            return val.replace("\r\n", "\\n").replace("\n", "\\n").strip()
-
-        return val
+    def get_summary(self):
+        """[多态方法] 默认摘要实现"""
+        name_val = ""
+        try:
+            name_val = self.name
+        except:
+            pass
+        return f"[{self.type_name}] {name_val}".strip()
 
     def __str__(self):
-        # 尝试显示名字，没有则显示类型和ID
-        n = getattr(self, "name", "")
-        return f"<{self.type_name}:{n} ID={self.id}>"
+        return self.get_summary()
 
 
 # ==============================================================================
-# 2. WRAPPER CLASSES: 具体类型定义 (使用 @MendixMap)
+# 2. 类型定义 (Wrapper Classes)
 # ==============================================================================
+
+# --- Domain Model 层 ---
 
 
 @MendixMap("Projects$Module")
 class Projects_Module(MendixElement):
     def get_domain_model(self):
-        # 特殊逻辑：DomainModel 不是属性，而是 Unit，需保留此方法
-        dm_units = self._raw.GetUnitsOfType("DomainModels$DomainModel")
-        raw_dm = next(iter(dm_units), None)
+        raw_dm = next(iter(self._raw.GetUnitsOfType("DomainModels$DomainModel")), None)
         return ElementFactory.create(raw_dm, self.ctx)
 
     def find_microflow(self, mf_name):
-        mf_units = self._raw.GetUnitsOfType("Microflows$Microflow")
-        raw_mf = next((m for m in mf_units if m.Name == mf_name), None)
+        raw_mf = next(
+            (
+                m
+                for m in self._raw.GetUnitsOfType("Microflows$Microflow")
+                if m.Name == mf_name
+            ),
+            None,
+        )
         return ElementFactory.create(raw_mf, self.ctx)
-
-
-@MendixMap("DomainModels$DomainModel")
-class DomainModels_DomainModel(MendixElement):
-    # 完全依靠 __getattr__ 处理 .entities, .associations 等
-    pass
-
-
-# --- 关联关系 ---
-
-
-class BaseAssociation(MendixElement):
-    """关联基类，包含通用逻辑"""
-
-    def get_info(self, entity_lookup):
-        p_guid = str(self.parent)  # 使用 .parent 自动映射
-        p_name = entity_lookup.get(p_guid, "UnknownParent")
-        c_name = self.get_child_name(entity_lookup)
-
-        # 使用 .type, .owner 自动映射
-        arrow = "<->" if "Reference" == self.type else "<==>"
-        return f"{self.name}: {p_name} {arrow} {c_name} [Type:{self.type} | Owner:{self.owner}]"
-
-
-@MendixMap("DomainModels$Association")
-class DomainModels_Association(BaseAssociation):
-    def get_child_name(self, entity_lookup):
-        # Association 存储的是 Child 的 GUID
-        c_guid = str(self.child)
-        return entity_lookup.get(c_guid, f"UnknownChild({c_guid})")
-
-
-@MendixMap("DomainModels$CrossAssociation")
-class DomainModels_CrossAssociation(BaseAssociation):
-    def get_child_name(self, entity_lookup):
-        # CrossAssociation 存储的是 Child 的字符串全名
-        return self.child
-
-
-# --- 实体与属性 ---
 
 
 @MendixMap("DomainModels$Entity")
 class DomainModels_Entity(MendixElement):
-    pass  # .name, .attributes, .generalization 均自动处理
+    def is_persistable(self):
+        gen = self.generalization
+        if not gen.is_valid:
+            return True  # 默认持久化
+        # 如果是 NoGeneralization，看其自身的 persistable 属性
+        if gen.type_name == "NoGeneralization":
+            return gen.persistable
+        # 如果是继承，递归看父类
+        parent_qname = gen.generalization
+        parent = self.ctx.find_entity_by_qname(parent_qname)
+        return parent.is_persistable() if parent and parent.is_valid else True
+
+@MendixMap("DomainModels$Association")
+class DomainModels_Association(MendixElement):
+    def get_info(self, lookup):
+        p_name = lookup.get(str(self.parent), "Unknown")
+        c_name = lookup.get(str(self.child), "Unknown")
+        return f"- [Assoc] {self.name}: {p_name} -> {c_name} [Type:{self.type}, Owner:{self.owner}]"
+
+@MendixMap("DomainModels$CrossAssociation")
+class DomainModels_CrossAssociation(MendixElement):
+    def get_info(self, lookup):
+        p_name = lookup.get(str(self.parent), "Unknown")
+        # CrossAssociation 的 child 属性通常已经是字符串全名
+        return f"- [Cross] {self.name}: {p_name} -> {self.child} [Type:{self.type}, Owner:{self.owner}]"
+
+@MendixMap("DomainModels$AssociationOwner")
+class DomainModels_AssociationOwner(MendixElement):
+    def __str__(self): return self.type_name
+
+@MendixMap("DomainModels$AssociationCapabilities")
+class DomainModels_AssociationCapabilities(MendixElement):
+    def __str__(self): return self.type_name
 
 
+# --- 微流动作层 (Microflow Actions) ---
+
+
+@MendixMap("Microflows$ActionActivity")
+class Microflows_ActionActivity(MendixElement):
+    def get_summary(self):
+        # Activity 代理其内部 Action 的摘要
+        return self.action.get_summary()
+
+
+@MendixMap("Microflows$MicroflowCallAction")
+class Microflows_MicroflowCallAction(MendixElement):
+    def get_summary(self):
+        call = self.microflow_call
+        target = call.microflow if call else "Unknown"
+
+        # 解析参数映射
+        params = []
+        if call and call.parameter_mappings:
+            for m in call.parameter_mappings:
+                p_name = m.parameter.split(".")[-1]  # 只取参数名
+                params.append(f"{p_name}={m.argument}")
+        param_str = f"({', '.join(params)})" if params else "()"
+
+        out = f" -> ${self.output_variable_name}" if self.use_return_variable else ""
+        return f"⚡ Call: {target}{param_str}{out}"
+
+
+@MendixMap("Microflows$RetrieveAction")
+class Microflows_RetrieveAction(MendixElement):
+    def get_summary(self):
+        src = self.retrieve_source
+        entity = getattr(src, "entity", "Unknown")
+        xpath = getattr(src, "x_path_constraint", "")
+        xpath_str = f" [{xpath}]" if xpath else ""
+        return f"🔍 Retrieve: {entity}{xpath_str} -> ${self.output_variable_name}"
+
+
+@MendixMap("Microflows$CreateVariableAction")
+class Microflows_CreateVariableAction(MendixElement):
+    def get_summary(self):
+        value_format = self.initial_value.replace("\n", "\\n")
+        return f"💎 Create: ${self.variable_name} ({self.variable_type}) = {value_format}"
+
+
+@MendixMap("Microflows$ChangeVariableAction")
+class Microflows_ChangeVariableAction(MendixElement):
+    def get_summary(self):
+        return f"📝 Change: ${self.variable_name} = {self.value}"
+
+
+@MendixMap("Microflows$ExclusiveSplit")
+class Microflows_ExclusiveSplit(MendixElement):
+    def get_summary(self):
+        expr = self.split_condition.expression
+        caption = f" [{self.caption}]" if self.caption and self.caption != expr else ""
+        return f"❓ Split{caption}: {expr}"
+
+
+@MendixMap("Microflows$EndEvent")
+class Microflows_EndEvent(MendixElement):
+    def get_summary(self):
+        ret = f" (Return: {self.return_value})" if self.return_value else ""
+        return f"🛑 End{ret}"
+
+
+# --- 数据类型定义 ---
+@MendixMap("DataTypes$StringType")
+class DataTypes_StringType(MendixElement):
+    def __str__(self):
+        return "String"
+
+
+@MendixMap("DataTypes$VoidType")
+class DataTypes_VoidType(MendixElement):
+    def __str__(self):
+        return "Void"
+
+
+@MendixMap("DataTypes$BooleanType")
+class DataTypes_BooleanType(MendixElement):
+    def __str__(self):
+        return "Boolean"
+
+
+# --- 属性类型定义 (Attribute Types) ---
 @MendixMap("DomainModels$Attribute")
 class DomainModels_Attribute(MendixElement):
-    def get_type_summary(self):
-        # 使用 .type 访问属性
-        type_obj = self.type
-        return str(type_obj) if type_obj.is_valid else "UnknownType"
+    def get_summary(self):
+        doc = f" // {self.documentation}" if self.documentation else ""
+        return f"- {self.name}: {self.type}{doc}"
 
 
-# 属性类型
 @MendixMap("DomainModels$EnumerationAttributeType")
 class DomainModels_EnumerationAttributeType(MendixElement):
     def __str__(self):
-        return f"Enumeration[{self.enumeration}]"  # .enumeration
+        # enumeration 是属性，返回枚举的全名
+        return f"Enum({self.enumeration})"
 
 
 @MendixMap("DomainModels$StringAttributeType")
 class DomainModels_StringAttributeType(MendixElement):
     def __str__(self):
-        limit = "Unlimited" if self.length == 0 else f"Length: {self.length}"
-        return f"String[{limit}]"  # .length
-
-
-@MendixMap("DomainModels$DateTimeAttributeType")
-class DomainModels_DateTimeAttributeType(MendixElement):
-    def __str__(self):
-        loc = "Localized" if self.localize_date else "UTC"  # .localize
-        return f"DateTime[{loc}]"
-
-
-@MendixMap("DomainModels$BooleanAttributeType")
-class DomainModels_BooleanAttributeType(MendixElement):
-    def __str__(self):
-        return "Boolean"
+        return f"String({self.length if self.length > 0 else 'Unlimited'})"
 
 
 @MendixMap("DomainModels$IntegerAttributeType")
@@ -269,362 +330,186 @@ class DomainModels_IntegerAttributeType(MendixElement):
         return "Integer"
 
 
+@MendixMap("DomainModels$DateTimeAttributeType")
+class DomainModels_DateTimeAttributeType(MendixElement):
+    def __str__(self):
+        return "DateTime"
+
+
+@MendixMap("DomainModels$BooleanAttributeType")
+class DomainModels_BooleanAttributeType(MendixElement):
+    def __str__(self):
+        return "Boolean"
+
+
+@MendixMap("DomainModels$DecimalAttributeType")
+class DomainModels_DecimalAttributeType(MendixElement):
+    def __str__(self):
+        return "Decimal"
+
+
 @MendixMap("DomainModels$LongAttributeType")
 class DomainModels_LongAttributeType(MendixElement):
     def __str__(self):
         return "Long"
 
 
-@MendixMap("DomainModels$DecimalAttributeType")
-class DomainModels_DecimalAttributeType(MendixElement):
-    def __str__(self):
-        return f"Decimal"
-
-
-@MendixMap("DomainModels$AutoNumberAttributeType")
-class DomainModels_AutoNumberAttributeType(MendixElement):
-    def __str__(self):
-        return "AutoNumber"
-
-
-@MendixMap("DomainModels$BinaryAttributeType")
-class DomainModels_BinaryAttributeType(MendixElement):
-    def __str__(self):
-        return "Binary"
-
-
-# --- 泛化 (Generalization) ---
-
-
-class GeneralizationBase(MendixElement):
-    def is_persistable(self):
-        return False
-
-
-@MendixMap("DomainModels$NoGeneralization")
-class DomainModels_NoGeneralization(GeneralizationBase):
-    def is_persistable(self):
-        return self.persistable  # 自动映射
-
-
-@MendixMap("DomainModels$Generalization")
-class DomainModels_Generalization(GeneralizationBase):
-    def is_persistable(self):
-        # 这里 logic 比较复杂，保留显式代码，但利用属性访问
-        qname = self.generalization  # 父实体全名
-        if qname:
-            parent_entity = self.ctx.find_entity_by_qname(qname)
-            if parent_entity and parent_entity.is_valid:
-                parent_gen = parent_entity.generalization
-                if parent_gen.is_valid:
-                    return parent_gen.is_persistable()
-        return False
-
-
-# --- 微流 ---
-
-
-@MendixMap("Microflows$Microflow")
-class Microflows_Microflow(MendixElement):
-    # .object_collection, .flows 等由基类接管
-    # .object_collection.objects
-    pass
-
-
-@MendixMap("Microflows$ExclusiveSplit")
-class Microflows_ExclusiveSplit(MendixElement):
-    # .caption:string
-    # .split_condition.expression
-    pass
-
-
-@MendixMap("Microflows$ActionActivity")
-class Microflows_ActionActivity(MendixElement):
-    # .caption:string
-    # .documentation:string
-    # .action:Microflows$MicroflowCallAction
-    pass
-
-
-@MendixMap("Microflows$MicroflowCallAction")
-class Microflows_MicroflowCallAction(MendixElement):
-    # .errorHandlingType
-    # .useReturnVariable
-    # .outputVarableName
-    # .microflowCall:Microflows$MicroflowCall
-    pass
-
-
-@MendixMap("Microflows$MicroflowCall")
-class Microflows_MicroflowCall(MendixElement):
-    # .parameterMappings:Microflows$MicroflowParameterMapping
-    # .microflow:string
-    pass
-
-
-@MendixMap("Microflows$MicroflowParameterMapping")
-class Microflows_MicroflowParameterMapping(MendixElement):
-    # .argument
-    # .parameter
-    pass
-
-
-@MendixMap("Microflows$MicroflowParameterObject")
-class Microflows_MicroflowParameterObject(MendixElement):
-    """
-    get from Microflows_Microflow.object_collection.objects[]
-    """
-
-    # name
-    # document
-    # is_required
-    # default_value
-    # variable_type
-    pass
-
-
-@MendixMap("DataTypes$StringType")
-class DataTypes_StringType(MendixElement):
-    pass
-
-
 # ==============================================================================
-# 3. LOGIC LAYER: 业务分析器 (已更新为使用新语法)
+# 3. 业务逻辑层 (Business Logic)
 # ==============================================================================
 
 
 class DomainModelAnalyzer:
     def __init__(self, context):
         self.ctx = context
-        self.entity_lookup = {}
 
     def execute(self, module_name):
         module = self.ctx.find_module(module_name)
-        if not module or not module.is_valid:
-            self.ctx.log(f"[Error] Module '{module_name}' not found.")
-            return
-
-        self.ctx.log(f"DOMAIN ANALYSIS: {module.name}")
-        self.ctx.log("-" * 60)
-
-        # 1. 访问 DomainModel
+        if not module: return
+        
+        self.ctx.log(f"# DOMAIN MODEL: {module.name}\n")
         dm = module.get_domain_model()
-        if not dm.is_valid:
-            return
+        if not dm.is_valid: return
 
-        # 2. 分析实体 (使用 .entities)
-        entities = dm.entities
-        self.ctx.log(f"Entities ({len(entities)} found):")
+        # 构建局部 Lookup Table，避免全局耦合
+        id_map = {}
 
-        for e in entities:
-            self.entity_lookup[e.id] = f"{module.name}.{e.name}"
+        # 1. 分析实体
+        for ent in dm.entities:
+            # 记录 ID 到全名的映射
+            id_map[ent.id] = f"{module.name}.{ent.name}"
+            
+            p_tag = " [P]" if ent.is_persistable() else " [NP]"
+            gen_info = f" extends {ent.generalization.generalization}" if ent.generalization.type_name == "Generalization" else ""
+            self.ctx.log(f"## Entity: {ent.name}{p_tag}{gen_info}")
+            
+            if ent.documentation: self.ctx.log(f"> {ent.documentation}")
+            for attr in ent.attributes:
+                self.ctx.log(attr.get_summary(), indent=1)
+            self.ctx.log("")
 
-            # 使用 .generalization
-            gen = e.generalization
-            is_persist = gen.is_persistable() if gen.is_valid else False
-            tag = "[Persistable]" if is_persist else "[Non-Persistable]"
+        # 2. 分析关联关系 (使用 get_info 传递查找表)
+        if dm.associations:
+            self.ctx.log("## Associations (Internal)")
+            for assoc in dm.associations:
+                self.ctx.log(assoc.get_info(id_map))
+            self.ctx.log("")
 
-            # 使用 .documentation
-            parent_info = ""
-            if gen.type_name == "Generalization":
-                # Generalization 对象有一个同名属性 generalization 存储父实体全名
-                parent_info = f" extends {gen.generalization}"
-
-            doc_str = f" // {e.documentation}" if e.documentation else ""
-            self.ctx.log(f"  [Entity] {e.name} {tag}{parent_info}{doc_str}")
-
-            # 遍历属性 (使用 .attributes)
-            for attr in e.attributes:
-                # 链式访问: attr.value.default_value
-                def_val_obj = attr.value
-                def_val = def_val_obj.default_value if def_val_obj.is_valid else None
-                def_str = f" = {def_val}" if def_val else ""
-
-                doc_suffix = f" // {attr.documentation}" if attr.documentation else ""
-                self.ctx.log(
-                    f"    - {attr.name}: {attr.get_type_summary()}{def_str}{doc_suffix}"
-                )
-
-        # 3. 分析关联 (使用 .associations 和 .cross_associations)
-        internal = dm.associations
-        cross = dm.cross_associations
-
-        if internal or cross:
-            self.ctx.log(
-                f"\nAssociations (Internal: {len(internal)}, Cross: {len(cross)}):"
-            )
-            for a in internal:
-                self.ctx.log(f"    {a.get_info(self.entity_lookup)}")
-            for a in cross:
-                self.ctx.log(f"    {a.get_info(self.entity_lookup)}")
-
-        self.ctx.log("=" * 60)
-
-
+        if dm.cross_associations:
+            self.ctx.log("## Associations (Cross)")
+            for assoc in dm.cross_associations:
+                self.ctx.log(assoc.get_info(id_map))
+            self.ctx.log("")
+            
 class MicroflowAnalyzer:
     def __init__(self, context):
         self.ctx = context
-        self.visited = set()
-        self.node_map = {}
-        self.adj_list = {}
 
     def execute(self, module_name, mf_name):
         module = self.ctx.find_module(module_name)
         if not module:
             return
-
         mf = module.find_microflow(mf_name)
         if not mf.is_valid:
-            self.ctx.log(f"Microflow '{mf_name}' not found.")
             return
 
-        self.ctx.log(f"MICROFLOW ANALYSIS: {mf.name}")
-        self.ctx.log("-" * 60)
+        # 修改点1：打印全名
+        self.ctx.log(f"# MICROFLOW: {module_name}.{mf.name}\n'''")
 
-        # 构建图: 使用 .object_collection.objects
-        objects = mf.object_collection.objects
-        self.node_map = {obj.id: obj for obj in objects}
-
-        # 构建连接: 使用 .flows
+        nodes = {obj.id: obj for obj in mf.object_collection.objects}
+        adj = {}
         for flow in mf.flows:
-            # origin / destination 是引用对象
-            org = str(flow.origin)
-            dst = str(flow.destination)
-            if org and dst:
-                if org not in self.adj_list:
-                    self.adj_list[org] = []
-                self.adj_list[org].append((flow, dst))
+            src, dst = str(flow.origin), str(flow.destination)
+            if src not in adj:
+                adj[src] = []
+            adj[src].append((flow, dst))
 
-        # 寻找起点
-        start = next((n for n in objects if "StartEvent" in n.type_name), None)
-        if start:
-            self._traverse(start.id)
-        else:
-            self.ctx.log("Error: StartEvent not found.")
-        self.ctx.log("=" * 60)
-
-    def _traverse(self, node_id, prefix=""):
-        if node_id in self.visited:
-            self.ctx.log(f"{prefix}(Loop)")
-            return
-        self.visited.add(node_id)
-
-        node = self.node_map.get(node_id)
-        if not node:
+        start_node = next(
+            (n for n in nodes.values() if "StartEvent" in n.type_name), None
+        )
+        if not start_node:
             return
 
-        self.ctx.log(f"{prefix}{self._get_node_details(node)}")
+        stack = [(start_node.id, 0, "")]
+        visited = set()
 
-        outgoing = self.adj_list.get(node_id, [])
-        for flow, target_id in outgoing:
-            label = ""
-            # case_value 是对象
-            case_val = (
-                flow.case_values[0] if len(flow.case_values) > 0 else None
-            )  # 为空，或者仅有一个 Microflows$NoCase Microflows$EnumerationCase.value [String true or false]
-            if (
-                case_val
-                and case_val.is_valid
-                and case_val.full_type == "Microflows$EnumerationCase"
-            ):
-                # value 是属性
-                val = case_val.value
-                label = f"--[{val if val else case_val.type_name}]--> "
-            elif len(outgoing) > 1:
-                label = "--> "
+        while stack:
+            node_id, indent, flow_label = stack.pop()
+            node = nodes.get(node_id)
+            if not node:
+                continue
 
-            if len(outgoing) > 1:
-                self.ctx.log(f"{prefix}  {label}")
-                self._traverse(target_id, prefix + "    ")
-            else:
-                self._traverse(target_id, prefix)
+            label_str = f"--({flow_label})--> " if flow_label else ""
+            self.ctx.log(f"{label_str}{node.get_summary()}", indent=indent)
 
-    def _get_node_details(self, node):
-        """完全使用动态属性访问的详情解析"""
-        base_type = node.type_name
-        summary = f"[{base_type}]"
+            if node_id in visited:
+                self.ctx.log("└─ (Jump/Loop)", indent=indent + 1)
+                continue
+            visited.add(node_id)
 
-        # 1. ActionActivity
-        if "ActionActivity" in base_type:
-            action = node.action  # 自动映射
-            act_type = action.type_name
-            summary = f"[{act_type}]"
+            out_flows = adj.get(node_id, [])
+            # 修改点2：同一 flow 不增加缩进，只有分叉(Condition)才增加
+            has_branches = len(out_flows) > 1
 
-            # A. MicroflowCall
-            if "MicroflowCall" in act_type:
-                mf_call = action.microflow_call
-                t_name = mf_call.microflow
-                summary += f" Target: {t_name}"
+            for flow, target_id in reversed(out_flows):
+                case_val = ""
+                if has_branches and len(flow.case_values) > 0:
+                    cv = flow.case_values[0]
+                    case_val = getattr(cv, "value", cv.type_name)
 
-                # 处理参数映射
-                mappings = mf_call.parameter_mappings
-                if mappings:
-                    params = []
-                    for m in mappings:
-                        # argument 是表达式字符串，parameter 是目标参数名
-                        params.append(f"{m.parameter.split('.')[-1]}={m.argument}")
-                    summary += f" ({', '.join(params)})"
+                # 如果是单线流，indent不变；如果是分叉流，indent+1
+                new_indent = indent + 1 if has_branches else indent
+                stack.append((target_id, new_indent, case_val))
 
-                if action.output_variable_name:
-                    summary += f" -> ${action.output_variable_name}"
-
-            # B. Retrieve
-            elif "Retrieve" in act_type:
-                src = action.retrieve_source
-                e_name = src.entity
-
-                xpath = src.x_path_constraint
-                summary += f" Entity: {e_name}"
-                if xpath:
-                    summary += f" | XPath: {xpath}"
-                if action.output_variable_name:
-                    summary += f" -> ${action.output_variable_name}"
-
-            # C. CreateVariable
-            elif "CreateVariable" in act_type:
-                # initialValue 是 CodeSnippet 对象
-                val = getattr(action.initial_value, "code", str(action.initial_value))
-                summary += f" ${action.variable_name} = {val}"
-
-            # D. ChangeVariable
-            elif "ChangeVariable" in act_type:
-                summary += f" ${action.variable_name} = {action.value}"
-
-        # 2. EndEvent
-        elif "EndEvent" in base_type:
-            if node.return_value:
-                summary += f" Return: {node.return_value}"
-
-        # 3. Parameter
-        elif "Parameter" in base_type:
-            v_type = node.variable_type.type_name
-            summary = f"[Parameter] {node.name} ({v_type})"
-
-        # 4. ExclusiveSplit
-        elif "ExclusiveSplit" in base_type:
-            expr = node.split_condition.expression
-            summary += f" ? {expr}"
-            if node.caption and node.caption != expr:
-                summary += f" ({node.caption})"
-
-        return summary
-
+        self.ctx.log(f"'''")
 
 # ==============================================================================
-# 4. EXECUTION
+# 4. 执行入口 (Execution)
 # ==============================================================================
+
 try:
     PostMessage("backend:clear", "")
-    context = MendixContext(root)
+    ctx = MendixContext(currentApp, root)
 
-    # 替换为实际的模块名称
-    DomainModelAnalyzer(context).execute("AmazonBedrockConnector")
+    # 分析领域模型
+    DomainModelAnalyzer(ctx).execute("AmazonBedrockConnector")  # 替换为你的模块名
 
-    # 替换为实际的微流
-    MicroflowAnalyzer(context).execute("AltairIntegration", "Tool_SparqlConverter")
+    # 分析微流
+    MicroflowAnalyzer(ctx).execute(
+        "AltairIntegration", "Tool_SparqlConverter"
+    )  # 替换为你的微流
 
-    PostMessage("backend:info", context.flush_logs())
+    # --- 获取分析报告内容 ---
+    final_report = ctx.flush_logs()
+
+    # --- 保存并打开文件 ---
+    try:
+        # 1. 构建文件路径 (用户根目录/Mendix_Report.md)
+        user_home = os.path.expanduser("~")
+        file_path = os.path.join(user_home, "Mendix_Analysis_Report.md")
+
+        # 2. 写入文件
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(final_report)
+
+        PostMessage("backend:info", f"✅ Report saved to: {file_path}")
+
+        # 3. 使用系统默认程序打开文件 (仅限 Windows)
+        if os.name == "nt":
+            os.startfile(file_path)
+        else:
+            # 兼容其他系统(如果适用)
+            import subprocess
+
+            subprocess.call(
+                ("open" if os.name == "posix" else "start", file_path), shell=True
+            )
+
+    except Exception as file_err:
+        PostMessage("backend:error", f"File operation failed: {str(file_err)}")
+
+    # 依然在 Studio Pro 后端控制台打印一份
+    PostMessage("backend:info", final_report)
 
 except Exception as e:
-    err_msg = f"Script Error: {str(e)}\n{traceback.format_exc()}"
-    PostMessage("backend:error", err_msg)
+    PostMessage("backend:error", f"Error: {str(e)}\n{traceback.format_exc()}")
