@@ -177,6 +177,16 @@ class Projects_Module(MendixElement):
             None,
         )
         return ElementFactory.create(raw_mf, self.ctx)
+    def find_workflow(self, workflow_name):
+        raw_wf = next(
+            (
+                w
+                for w in self._raw.GetUnitsOfType("Workflows$Workflow")
+                if w.Name == workflow_name
+            ),
+            None,
+        )
+        return ElementFactory.create(raw_wf, self.ctx)
 #endregion
 #region 2.1 DomainModels
 @MendixMap("DomainModels$Entity")
@@ -727,7 +737,170 @@ class Pages_SnippetCall(MendixElement):
 #region 2.1 Texts
 #endregion
 
-#region 2.1 Projects
+#region 2.1 Workflows
+
+from typing import List
+
+# --- Microflows Module ---
+
+@MendixMap("Microflows$StringTemplate")
+class Microflows_StringTemplate(MendixElement):
+    # .text:str
+    pass
+
+@MendixMap("Microflows$Annotation")
+class Microflows_Annotation(MendixElement):
+    # .description:str
+    pass
+
+
+# --- Pages Module ---
+
+@MendixMap("Pages$PageReference")
+class Pages_PageReference(MendixElement):
+    pass
+
+
+# --- Workflows Module ---
+
+@MendixMap("Workflows$Workflow")
+class Workflows_Workflow(MendixElement):
+    # .parameter:Workflows_WorkflowParameter
+    # .flow:Workflows_Flow
+    # .workflow_name:Microflows_StringTemplate
+    # .workflow_description:Microflows_StringTemplate
+    # .name:str
+    # .excluded:bool
+    # .export_level:str
+    # .persistent_id:str
+    # .title:str
+    pass
+
+@MendixMap("Workflows$WorkflowParameter")
+class Workflows_WorkflowParameter(MendixElement):
+    # .name:str
+    # .entity:str
+    pass
+
+@MendixMap("Workflows$Flow")
+class Workflows_Flow(MendixElement):
+    # .activities:List[MendixElement]
+    pass
+
+@MendixMap("Workflows$XPathBasedUserSource")
+class Workflows_XPathBasedUserSource(MendixElement):
+    pass
+
+@MendixMap("Workflows$UserTaskOutcome")
+class Workflows_UserTaskOutcome(MendixElement):
+    # .flow:Workflows_Flow
+    # .persistent_id:str
+    # .value:str
+    pass
+
+@MendixMap("Workflows$NoEvent")
+class Workflows_NoEvent(MendixElement):
+    pass
+
+@MendixMap("Workflows$SingleUserTaskActivity")
+class Workflows_SingleUserTaskActivity(MendixElement):
+    # .task_page:Pages_PageReference
+    # .task_name:Microflows_StringTemplate
+    # .task_description:Microflows_StringTemplate
+    # .user_source:Workflows_XPathBasedUserSource
+    # .outcomes:List[Workflows_UserTaskOutcome]
+    # .on_created_event:Workflows_NoEvent
+    # .persistent_id:str
+    # .name:str
+    # .caption:str
+    # .auto_assign_single_target_user:bool
+    pass
+
+@MendixMap("Workflows$AllUserInput")
+class Workflows_AllUserInput(MendixElement):
+    pass
+
+@MendixMap("Workflows$ConsensusCompletionCriteria")
+class Workflows_ConsensusCompletionCriteria(MendixElement):
+    pass
+
+@MendixMap("Workflows$MultiUserTaskActivity")
+class Workflows_MultiUserTaskActivity(MendixElement):
+    # .task_page:Pages_PageReference
+    # .task_name:Microflows_StringTemplate
+    # .task_description:Microflows_StringTemplate
+    # .user_source:Workflows_XPathBasedUserSource
+    # .outcomes:List[Workflows_UserTaskOutcome]
+    # .on_created_event:Workflows_NoEvent
+    # .target_user_input:Workflows_AllUserInput
+    # .completion_criteria:Workflows_ConsensusCompletionCriteria
+    # .persistent_id:str
+    # .name:str
+    # .caption:str
+    # .auto_assign_single_target_user:bool
+    # .await_all_users:bool
+    pass
+
+@MendixMap("Workflows$BooleanConditionOutcome")
+class Workflows_BooleanConditionOutcome(MendixElement):
+    # .flow:Workflows_Flow
+    # .persistent_id:str
+    # .value:str
+    pass
+
+@MendixMap("Workflows$ExclusiveSplitActivity")
+class Workflows_ExclusiveSplitActivity(MendixElement):
+    # .outcomes:List[Workflows_BooleanConditionOutcome]
+    # .persistent_id:str
+    # .name:str
+    # .caption:str
+    # .expression:str
+    pass
+
+@MendixMap("Workflows$ParallelSplitOutcome")
+class Workflows_ParallelSplitOutcome(MendixElement):
+    # .flow:Workflows_Flow
+    # .persistent_id:str
+    pass
+
+@MendixMap("Workflows$ParallelSplitActivity")
+class Workflows_ParallelSplitActivity(MendixElement):
+    # .outcomes:List[Workflows_ParallelSplitOutcome]
+    # .persistent_id:str
+    # .name:str
+    # .caption:str
+    pass
+
+@MendixMap("Workflows$WaitForNotificationActivity")
+class Workflows_WaitForNotificationActivity(MendixElement):
+    # .persistent_id:str
+    # .name:str
+    # .caption:str
+    pass
+
+@MendixMap("Workflows$WaitForTimerActivity")
+class Workflows_WaitForTimerActivity(MendixElement):
+    # .annotation:Microflows_Annotation
+    # .persistent_id:str
+    # .name:str
+    # .caption:str
+    # .delay:str
+    pass
+
+@MendixMap("Workflows$CallWorkflowActivity")
+class Workflows_CallWorkflowActivity(MendixElement):
+    # .persistent_id:str
+    # .name:str
+    # .caption:str
+    # .execute_async:bool
+    pass
+
+@MendixMap("Workflows$CallMicroflowTask")
+class Workflows_CallMicroflowTask(MendixElement):
+    # .persistent_id:str
+    # .name:str
+    # .caption:str
+    pass
 #endregion
 
 #region 2.1 Projects
@@ -882,6 +1055,38 @@ class PageAnalyzer:
         elif hasattr(w, "contents") and w.type_name in ["ListView", "DataView", "TemplateGrid"]:
             for child in w.contents.widgets: self._render_widget(child, indent + 1)
 
+class WorkflowAnalyzer:
+    def __init__(self, context):
+        self.ctx = context
+
+    def execute(self, module_name, wf_name):
+        module = self.ctx.find_module(module_name)
+        if not module: return
+        wf = module.find_workflow(wf_name)
+        if not wf or not wf.is_valid:
+            self.ctx.log(f"❌ Workflow not found: {module_name}.{wf_name}")
+            return
+
+        self.ctx.log(f"# WORKFLOW: {module_name}.{wf.name}\n")
+        self._render_flow(wf.flow, 0)
+
+    def _render_flow(self, flow, indent):
+        if not flow or not flow.is_valid: return
+        
+        for act in flow.activities:
+            # 获取标题和名称
+            caption = act.caption if hasattr(act, "caption") else ""
+            name = f"({act.name})" if hasattr(act, "name") else ""
+            self.ctx.log(f"- [{act.type_name}] {caption} {name}".strip(), indent)
+
+            # 递归处理分支 (Outcomes)
+            if hasattr(act, "outcomes"):
+                for outcome in act.outcomes:
+                    val = getattr(outcome, "value", "Outcome")
+                    self.ctx.log(f" └─ Case: {val}", indent)
+                    # 如果分支有后续 Flow，递归打印
+                    if hasattr(outcome, "flow"):
+                        self._render_flow(outcome.flow, indent + 2)
 #endregion
 
 #region 4. 执行入口 (Execution)
@@ -898,6 +1103,8 @@ try:
     )  # 替换为你的微流
     # 分析页面
     PageAnalyzer(ctx).execute("Evora_UI", "Login")
+    # 参数 1: 模块名, 参数 2: 工作流名
+    WorkflowAnalyzer(ctx).execute("Module", "Workflow")
     # --- 获取分析报告内容 ---
     final_report = ctx.flush_logs()
 
