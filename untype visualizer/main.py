@@ -31,6 +31,7 @@ class MendixApp:
 
     def handle_message(self, message_wrapper: Any):
         req_id = None
+        traceId = None  # [Telemetry] 初始化 traceId
         try:
             # Dual-layer deserialization safety
             json_str = System.Text.Json.JsonSerializer.Serialize(message_wrapper)
@@ -42,6 +43,7 @@ class MendixApp:
             if not isinstance(request, dict): return
 
             req_id = request.get("id")
+            traceId = request.get("traceId") # [Telemetry] 提取前端传入的 traceId
             method = request.get("method")
             params = request.get("params", {})
 
@@ -51,7 +53,8 @@ class MendixApp:
             result = self._routes[method](**params)
             
             # Send Success
-            response = {"jsonrpc": "2.0", "result": result, "requestId": req_id}
+            # [Telemetry] 将 traceId 原样返回给前端
+            response = {"jsonrpc": "2.0", "result": result, "requestId": req_id, "traceId": traceId}
             PostMessage("backend:response", json.dumps(response))
 
         except Exception as e:
@@ -59,9 +62,10 @@ class MendixApp:
             err_msg = f"{str(e)}\n{traceback.format_exc()}"
             PostMessage("backend:info", err_msg)
             if req_id is not None:
-                response = {"jsonrpc": "2.0", "error": {"message": str(e)}, "requestId": req_id}
+                # [Telemetry] 错误响应也携带 traceId
+                response = {"jsonrpc": "2.0", "error": {"message": str(e)}, "requestId": req_id, "traceId": traceId}
                 PostMessage("backend:response", json.dumps(response))
-    
+
     def cache_element(self, element):
         # 统一生成 ID，无论是 Unit, Element 还是 List
         if element is None: return None

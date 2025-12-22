@@ -68,6 +68,83 @@
   <script type="text/babel">
     const { React, ReactDOM, rxjs } = globalThis.__tmp;
     const { useState, useEffect, useContext, createContext, useMemo, useRef, useCallback } = React;
+    // ===========================================
+    // 0. TELEMETRY SERVICE (With Jaeger Export)
+    // ===========================================
+    class TelemetryService {
+      constructor() {
+        this.queue = [];
+        this.serviceName = "mendix-project-explorer";
+        this.endpoint = "http://localhost:19411/api/v2/spans"; // Zipkin/Jaeger endpoint
+
+        // 每 5 秒自动刷新缓冲区
+        setInterval(() => this.flush(), 5000);
+      }
+
+      genId(len) {
+        return [...Array(len)].map(() => Math.floor(Math.random() * 16).toString(16)).join('');
+      }
+
+      flush() {
+        if (this.queue.length === 0) return;
+        const batch = [...this.queue];
+        this.queue = [];
+
+        // 发送数据到 Jaeger (通过 Zipkin V2 API)
+        fetch(this.endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(batch)
+        }).catch(err => console.warn("[Telemetry] Export failed:", err));
+      }
+
+      startSpan(name, parentContext = null) {
+        const traceId = parentContext?.traceId || this.genId(32);
+        const parentId = parentContext?.spanId || null;
+        const spanId = this.genId(16);
+        const startTimeMs = Date.now(); //用于计算 Wall time
+        const startPerf = performance.now(); // 用于高精度计算 duration
+
+        // 本地日志
+        console.debug(`%c[Trace:${traceId.substring(0, 6)}] ➤ ${name}`, "color: #3b82f6");
+
+        return {
+          traceId,
+          spanId,
+          end: (attributes = {}) => {
+            const endPerf = performance.now();
+            const durationMs = endPerf - startPerf;
+            const durationMicros = Math.round(durationMs * 1000);
+            const timestampMicros = startTimeMs * 1000;
+
+            const status = attributes.error ? 'Error' : 'OK';
+            console.debug(`%c[Trace:${traceId.substring(0, 6)}] ◼ ${name} (${durationMs.toFixed(2)}ms)`, attributes.error ? "color: red" : "color: green");
+
+            // 构建 Zipkin V2 Span 对象
+            const spanData = {
+              traceId,
+              id: spanId,
+              parentId: parentId || undefined,
+              name,
+              timestamp: timestampMicros,
+              duration: durationMicros,
+              localEndpoint: { serviceName: this.serviceName },
+              tags: {
+                ...attributes,
+                "status": status,
+                "user_agent": navigator.userAgent
+              }
+            };
+
+            // 加入缓冲区
+            this.queue.push(spanData);
+
+            // 如果缓冲区过大，立即发送
+            if (this.queue.length >= 20) this.flush();
+          }
+        };
+      }
+    }
 
     // ===========================================
     // 1. RPC & STATE
@@ -75,18 +152,23 @@
     const AppContext = createContext();
 
     class RpcClient {
-      constructor() {
+      constructor(telemetry) {
+        this.telemetry = telemetry; // [Telemetry] Inject Service
         this.requestId = 0;
         this.pending = new Map();
         this.handleMessage = this.handleMessage.bind(this);
         window.addEventListener('message', this.handleMessage);
       }
+
       handleMessage(ev) {
         if (ev.data?.type === 'backend:info') return console.log("[Backend]", ev.data.data);
         if (ev.data?.type !== 'backendResponse') return;
 
         try {
           const payload = typeof ev.data.data === 'string' ? JSON.parse(ev.data.data) : ev.data.data;
+
+          // [Telemetry] 收到后端响应，可以在这里处理 traceId 关联，目前主要由 Promise flow 处理
+
           if (this.pending.has(payload.requestId)) {
             const { resolve, reject } = this.pending.get(payload.requestId);
             this.pending.delete(payload.requestId);
@@ -94,46 +176,86 @@
           }
         } catch (e) { console.error(e); }
       }
-      call(method, params = {}) {
+
+      // [Telemetry] 增加 parentSpan 参数
+      call(method, params = {}, parentSpan = null) {
         const id = ++this.requestId;
+        // 开启一个 RPC Span
+        const span = this.telemetry.startSpan(`RPC:${method}`, parentSpan);
+
         return new Promise((resolve, reject) => {
-          this.pending.set(id, { resolve, reject });
-          window.parent.sendMessage("frontend:message", { jsonrpc: "2.0", method, params, id });
+          this.pending.set(id, {
+            // 成功时结束 Span
+            resolve: (res) => {
+              span.end({ "rpc.status": "OK" });
+              resolve(res);
+            },
+            // 失败时结束 Span
+            reject: (err) => {
+              span.end({ "rpc.status": "Error", "error": "true", "error.message": String(err) });
+              reject(err);
+            }
+          });
+
+          // 发送消息，携带 traceId
+          window.parent.sendMessage("frontend:message", {
+            jsonrpc: "2.0",
+            method,
+            params,
+            id,
+            traceId: span.traceId // <--- 关键：发送给 Backend
+          });
+
           setTimeout(() => {
-            if (this.pending.has(id)) { this.pending.delete(id); reject("Timeout"); }
+            if (this.pending.has(id)) {
+              this.pending.delete(id);
+              span.end({ "rpc.status": "Timeout", "error": "true" });
+              reject("Timeout");
+            }
           }, 5000);
         });
       }
+
     }
 
     // [AppProvider]
     const AppProvider = ({ children }) => {
-      const rpc = useMemo(() => new RpcClient(), []);
+      // [Telemetry] 实例化服务
+      const telemetry = useMemo(() => new TelemetryService(), []);
+      // [Telemetry] 注入到 RPC
+      const rpc = useMemo(() => new RpcClient(telemetry), [telemetry]);
+
       const [selectedId, setSelectedId] = useState(null);
-      const [selectedPath, setSelectedPath] = useState(""); // 新增：存储树路径
+      const [selectedPath, setSelectedPath] = useState("");
       const [details, setDetails] = useState(null);
       const [loadingDetails, setLoadingDetails] = useState(false);
 
-      // 修改 selectNode，接收 path 参数
       const selectNode = useCallback(async (id, path) => {
         if (selectedId === id) return;
+
+        // [Telemetry] UI 操作开始 - Root Span
+        const span = telemetry.startSpan(`UI:SelectNode:${path.split('/').pop()}`);
+
         setSelectedId(id);
-        setSelectedPath(path); // 保存路径
+        setSelectedPath(path);
         setLoadingDetails(true);
         setDetails(null);
         try {
-          const res = await rpc.call('get_details', { node_id: id });
+          // [Telemetry] 将 span 传递给 RPC
+          const res = await rpc.call('get_details', { node_id: id }, span);
           setDetails(res);
+          span.end(); // [Telemetry] 成功结束
         } catch (err) {
           setDetails({ error: err.message || err });
+          span.end({ error: true }); // [Telemetry] 失败结束
         } finally {
           setLoadingDetails(false);
         }
-      }, [selectedId, rpc]);
+      }, [selectedId, rpc, telemetry]); // 添加 telemetry 依赖
 
-      // 暴露 selectedPath
+      // [Telemetry] 同时暴露 telemetry 实例供子组件使用 (如 Inspector)
       return (
-        <AppContext.Provider value={{ rpc, selectedId, selectedPath, selectNode, details, loadingDetails }}>
+        <AppContext.Provider value={{ rpc, telemetry, selectedId, selectedPath, selectNode, details, loadingDetails }}>
           {children}
         </AppContext.Provider>
       );
@@ -428,7 +550,7 @@
     };
 
     const Inspector = () => {
-      const { rpc, selectedId, selectedPath, loadingDetails } = useContext(AppContext);
+      const { rpc, selectedId, selectedPath, loadingDetails, telemetry } = useContext(AppContext);
 
       // State: 历史记录 [{ id, name, segment }] 和 当前指针
       const [history, setHistory] = useState([]);
@@ -474,9 +596,11 @@
 
       // === 1. 包装 loadNodeAndPush，添加 selectedPath 等依赖 ===
       const loadNodeAndPush = useCallback(async (id, name, segment, reset = false) => {
+        // [Telemetry] Start Span
+        const span = telemetry.startSpan(`UI:Drill:${name}`);
         setLoading(true);
         try {
-          const res = await rpc.call('get_details', { node_id: id });
+          const res = await rpc.call('get_details', { node_id: id }, span);
 
           if (reset) {
             // 这里使用了 selectedPath，必须确保它是最新的
@@ -497,12 +621,14 @@
             setCursor(nextHistory.length - 1);
           }
           setCurrentData(res);
+          span.end();
         } catch (err) {
           console.error(err);
+          span.end({ error: true });
         } finally {
           setLoading(false);
         }
-      }, [rpc, selectedPath, history, cursor]); // 依赖数组关键
+      }, [rpc, selectedPath, history, cursor, telemetry]); // 依赖数组关键
 
       // === 2. 包装 loadNodeOnly ===
       const loadNodeOnly = useCallback(async (id) => {
