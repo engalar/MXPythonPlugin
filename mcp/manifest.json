@@ -8,6 +8,9 @@
   "deps": [
     "pythonnet",
     "dependency-injector",
-    "pymx"
+    "pymx",
+    "importlib",
+    "typing",
+    "uuid"
   ]
 }
