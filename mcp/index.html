@@ -313,7 +313,7 @@
 
             // ... (JSX remains largely the same, but uses `tools` state variable)
             const statusColor = isRunning ? 'bg-green-500' : (serverState.status === 'stopped' ? 'bg-red-500' : 'bg-yellow-500');
-            const statusText = isRunning ? `Running on port ${serverState.port}` : (serverState.status === 'stopped' ? 'Stopped' : 'Unknown');
+            const statusText = isRunning ? `Running on port ${serverState.port} use http://localhost:${serverState.port}/a/mcp` : (serverState.status === 'stopped' ? 'Stopped' : 'Unknown');
 
             return (
                 <div className="p-4 border-b border-gray-200">

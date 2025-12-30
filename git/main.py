@@ -1,5 +1,5 @@
 # region FRAMEWORK CODE
-from pymx.git import containers as containers2
+from pymx.git import di as containers2
 import importlib
 import re
 import sys

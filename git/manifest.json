@@ -1,11 +1,15 @@
 {
   "name": "git",
-  "author": "wengao liu",
-  "email": "liuwengao@foxmail.com",
+  "author": null,
+  "email": null,
   "ui": "index.html",
   "plugin": "main.py",
   "deps": [
     "pythonnet",
-    "dependency-injector"
+    "dependency-injector",
+    "pymx",
+    "importlib",
+    "typing",
+    "uuid"
   ]
 }
