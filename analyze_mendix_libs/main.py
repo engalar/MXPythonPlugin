@@ -29,7 +29,7 @@ PostMessage("backend:clear", '')
 ShowDevTools()
 
 # ===================================================================
-# 1. JAR CONFLICT ANALYSIS LOGIC (FROM YOUR SCRIPT)
+# 1. JAR CONFLICT ANALYSIS LOGIC (UPDATED)
 # ===================================================================
 
 def parse_userlib_dir(directory_path: str) -> list:
@@ -59,6 +59,8 @@ def parse_userlib_dir(directory_path: str) -> list:
                 'library_name': lib_name if lib_name else filename.replace('.jar', ''),
                 'version': version if version else 'unknown',
                 'source': 'userlib',
+                # Store raw filename for deletion logic
+                'filename': filename, 
                 'details': {'filename': filename, 'required_by': set()}
             }
 
@@ -73,6 +75,7 @@ def parse_userlib_dir(directory_path: str) -> list:
     dependency_list = []
     for info in jar_info.values():
         required_by_str = ", ".join(sorted(list(info['details']['required_by']))) or "Unknown"
+        # Update details to be a string for display, but keep 'filename' field at root
         info['details'] = f"File: {info['details']['filename']} (Required by: {required_by_str})"
         dependency_list.append(info)
         
@@ -95,6 +98,7 @@ def parse_sbom_file(sbom_path: str) -> list:
                 'library_name': lib_name,
                 'version': comp.get('version', 'unknown'),
                 'source': 'SBOM (vendorlib)',
+                'filename': None, # SBOM entries have no physical file in userlib
                 'details': f"PURL: {comp.get('purl', 'N/A')}"
             })
     return dependency_list
@@ -107,6 +111,7 @@ def analyze_conflicts(dependencies: list) -> dict:
             grouped_libs[dep['library_name']].append({
                 'version': dep['version'],
                 'source': dep['source'],
+                'filename': dep.get('filename'), # Pass filename through
                 'details': dep['details']
             })
 
@@ -125,18 +130,21 @@ class MendixEnvironmentService:
         self.post_message = post_message_func
 
 class JarConflictService:
-    """Handles the business logic for analyzing JARs."""
+    """Handles the business logic for analyzing JARs and managing files."""
     def __init__(self, mendix_env: MendixEnvironmentService):
         self._mendix_env = mendix_env
+
+    def _get_userlib_path(self):
+        project_path = self._mendix_env.app.Root.DirectoryPath
+        return os.path.join(project_path, 'userlib')
 
     def analyze_project(self, payload: Dict) -> Dict:
         """Runs the full JAR analysis for the current Mendix project."""
         project_path = self._mendix_env.app.Root.DirectoryPath
         self._mendix_env.post_message("backend:info", f"Analyzing project at: {project_path}")
 
-        userlib_path = os.path.join(project_path, 'userlib')
+        userlib_path = self._get_userlib_path()
         
-        # Check for SBOM in both potential Mendix 9 and 10+ locations
         sbom_path_mx10 = os.path.join(userlib_path, 'vendorlib-sbom.json')
         sbom_path_mx9 = os.path.join(project_path, 'vendorlib', 'vendorlib-sbom.json')
         sbom_path = sbom_path_mx10 if os.path.exists(sbom_path_mx10) else sbom_path_mx9
@@ -149,9 +157,11 @@ class JarConflictService:
         df = pd.DataFrame(all_dependencies)
         all_deps_list = []
         if not df.empty:
-            df = df[['library_name', 'version', 'source', 'details']]
+            cols = ['library_name', 'version', 'source', 'details', 'filename']
+            existing_cols = [c for c in cols if c in df.columns]
+            df = df[existing_cols]
             df = df.sort_values(by=['library_name', 'version']).reset_index(drop=True)
-            all_deps_list = df.to_dict('records') # Convert to list of dicts for JSON
+            all_deps_list = df.to_dict('records')
 
         conflict_report = analyze_conflicts(all_dependencies)
 
@@ -166,24 +176,75 @@ class JarConflictService:
             }
         }
 
+    def batch_delete_jars(self, payload: Dict) -> Dict:
+        """Handles batch deletion with dry-run planning."""
+        filenames = payload.get('filenames', [])
+        dry_run = payload.get('dry_run', True)
+        
+        if not filenames:
+             return {"success": False, "message": "No filenames provided."}
+
+        userlib_path = self._get_userlib_path()
+        results = []
+        success_count = 0
+        
+        for filename in filenames:
+            # Security check
+            if os.path.sep in filename or '/' in filename or '\\' in filename:
+                results.append({"filename": filename, "status": "error", "reason": "Invalid filename path."})
+                continue
+
+            full_path = os.path.join(userlib_path, filename)
+            
+            if not os.path.exists(full_path):
+                results.append({"filename": filename, "status": "missing", "reason": "File not found."})
+                continue
+
+            if dry_run:
+                results.append({"filename": filename, "status": "ready", "reason": "File exists and is ready for deletion."})
+                success_count += 1
+            else:
+                try:
+                    os.remove(full_path)
+                    results.append({"filename": filename, "status": "deleted", "reason": "Successfully deleted."})
+                    success_count += 1
+                except Exception as e:
+                    results.append({"filename": filename, "status": "error", "reason": str(e)})
+
+        mode_str = "DRY RUN PLAN" if dry_run else "DELETION REPORT"
+        self._mendix_env.post_message("backend:info", f"{mode_str}: Processed {len(filenames)} files.")
+
+        return {
+            "success": True,
+            "dry_run": dry_run,
+            "results": results,
+            "summary": f"{success_count}/{len(filenames)} files {'ready to delete' if dry_run else 'deleted'}."
+        }
+
 
 class AppController:
     """Handles routing of commands from the frontend to specific services."""
     def __init__(self, jar_service: JarConflictService, mendix_env: MendixEnvironmentService):
         self._mendix_env = mendix_env
+        self._jar_service = jar_service
         self._command_handlers: Dict[str, Callable[[Dict], Any]] = {
-            "ANALYZE_JARS": jar_service.analyze_project,
+            "ANALYZE_JARS": self._jar_service.analyze_project,
+            "BATCH_DELETE_JARS": self._jar_service.batch_delete_jars,
         }
 
     def dispatch(self, request: Dict) -> Dict:
-        """Dispatches a request and ensures a consistently formatted response."""
         command_type = request.get("type")
         payload = request.get("payload", {})
         correlation_id = request.get("correlationId")
 
+        if command_type:
+            command_type = command_type.strip()
+
         handler = self._command_handlers.get(command_type)
         if not handler:
-            return self._create_error_response(f"No handler for command: {command_type}", correlation_id)
+            available_commands = list(self._command_handlers.keys())
+            error_msg = f"No handler found for command type: '{command_type}'. Available: {available_commands}"
+            return self._create_error_response(error_msg, correlation_id)
 
         try:
             result = handler(payload)
@@ -198,7 +259,6 @@ class AppController:
 
     def _create_error_response(self, message: str, correlation_id: str, data: Any = None) -> Dict:
         return {"status": "error", "message": message, "data": data or {}, "correlationId": correlation_id}
-
 
 # ===================================================================
 # 3. IOC CONTAINER CONFIGURATION
