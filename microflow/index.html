@@ -2,6 +2,7 @@
 <html lang="en">
 
 <head>
+    <style>/**plugin microflow 2026.1.3**/</style>
     <meta charset="UTF-8" />
     <script src="assets/tailwindcss.js"></script>
 </head>
@@ -159,6 +160,7 @@
             // --- Internal Message Handling ---
 
             _sendMessage(data) {
+                // html<here> -> webview -> c# -> python<onMessage>
                 window.parent.sendMessage('frontend:message', data);
             }
 
@@ -166,6 +168,8 @@
                 const { type, reqId, jobId, sessionId, channel } = msg;
 
                 switch (type) {
+                    // FOR RPC
+                    // send from plugin backend AppController._handle_rpc
                     case 'RPC_SUCCESS':
                         this.pendingRpcs.get(reqId)?.resolve(msg.data);
                         this.pendingRpcs.delete(reqId);
@@ -174,6 +178,8 @@
                         this.pendingRpcs.get(reqId)?.reject({ message: msg.message, traceback: msg.traceback });
                         this.pendingRpcs.delete(reqId);
                         break;
+                    // FOR JOB
+                    // send from plugin backend AppController._handle_job_start
                     case 'JOB_STARTED':
                         this.pendingRpcs.get(reqId)?.resolve({ jobId });
                         this.pendingRpcs.delete(reqId);
@@ -191,6 +197,8 @@
                         this.activeJobs.get(jobId)?.complete();
                         this.activeJobs.delete(jobId);
                         break;
+                    // FOR EVENT
+                    // send from plugin backend AppController._handle_session_connect [目前未实现完整]
                     case 'EVENT_BROADCAST':
                         this.broadcastChannels.get(channel)?.next(msg.data);
                         break;
