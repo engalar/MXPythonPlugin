@@ -76,11 +76,59 @@
             createContext,
             useContext,
         } = React;
-        const { BehaviorSubject, Subject, fromEvent, map, filter } = rxjs;
+        const { BehaviorSubject, Subject, fromEvent, map, filter, bufferTime } = rxjs;
         const { useSpring, useTransition, animated } = reactSpring;
 
         // 1. FRAMEWORK: CORE COMMUNICATION SERVICES
 
+        // --- Telemetry Service ---
+        const ITelemetryService = createIdentifier('ITelemetryService');
+        class TelemetryService {
+            constructor() {
+                this.span$ = new Subject();
+                this.jaegerEndpoint = "http://localhost:9411/api/v2/spans";
+                
+                // 每5秒或满10条导出一次，通过 Python 转发规避 CORS
+                this.span$.pipe(
+                    bufferTime(5000, null, 10),
+                    filter(batch => batch.length > 0)
+                ).subscribe(spans => this.exportBatch(spans));
+            }
+
+            genId(len) { return [...Array(len)].map(() => Math.floor(Math.random() * 16).toString(16)).join(''); }
+
+            startSpan(name, attributes = {}) {
+                const traceId = attributes.traceId || this.genId(32);
+                const spanId = this.genId(16);
+                const startTime = Date.now();
+                return {
+                    traceId,
+                    spanId,
+                    addEvent: (name) => {}, // 简化实现
+                    end: (endAttr = {}) => {
+                        this.span$.next({
+                            traceId, id: spanId, name,
+                            timestamp: startTime * 1000,
+                            duration: (Date.now() - startTime) * 1000,
+                            localEndpoint: { serviceName: "microflow-plugin" },
+                            tags: { ...attributes, ...endAttr }
+                        });
+                    }
+                };
+            }
+
+            exportBatch(spans) {
+                // 关键：匹配 Python 后端的 request_object.get('params') 结构
+                window.parent.sendMessage('frontend:message', {
+                    type: 'telemetry',
+                    method: 'export',
+                    params: {
+                        endpoint: this.jaegerEndpoint,
+                        spans: spans
+                    }
+                });
+            }
+        }
 
         const IApiService = createIdentifier('IApiService');
 
@@ -114,7 +162,7 @@
                 });
             }
 
-            startJob(method, params) {
+            startJob(method, params, { traceId, spanId }) {
                 const subject = new Subject();
                 const reqId = `req-${this.reqIdCounter++}`;
 
@@ -122,13 +170,13 @@
                     this.pendingRpcs.set(reqId, {
                         resolve: ({ jobId }) => {
                             this.activeJobs.set(jobId, subject);
-                            resolve({ jobId }); // Resolve promise with jobId once started
+                            resolve({ jobId });
                         },
                         reject
                     });
                 });
 
-                this._sendMessage({ type: 'JOB_START', reqId, method, params });
+                this._sendMessage({ type: 'JOB_START', reqId, method, params, traceId, spanId });
                 return { startPromise: promise, updates$: subject.asObservable() };
             }
 
@@ -236,9 +284,9 @@
             const [state, setState] = useState(initialJobState);
             const subRef = useRef(null);
 
-            const start = useCallback((params) => {
+            const start = useCallback((params, span) => {
                 setState({ ...initialJobState, status: 'starting' });
-                const { startPromise, updates$ } = api.startJob(method, params);
+                const { startPromise, updates$ } = api.startJob(method, params, span);
 
                 startPromise.then(({ jobId }) => {
                     subRef.current = updates$.subscribe({
@@ -470,6 +518,7 @@
         // -------------------------------------------------------------------
 
         const MicroflowGeneratorPanel = () => {
+            const telemetry = useDependency(ITelemetryService);
             const { status, progress, data, error, start } = useJob('microflow:generate');
             const [logs, setLogs] = useState([]);
             const logsEndRef = useRef(null);
@@ -488,7 +537,13 @@
 
             const handleStart = () => {
                 setLogs([]);
-                start({});
+                // 启动追踪
+                const span = telemetry.startSpan('Microflow:Generate:Click');
+                
+                // 传递 traceId 到后端 Job
+                start({}, span);
+                
+                span.end({ action: 'start_job' });
             };
 
             const isRunning = status === 'starting' || status === 'running';
@@ -589,6 +644,7 @@
             // --- Framework Registrations ---
             [IApiService, { useClass: ApiService }],
             [IPanelService, { useClass: PanelService }],
+            [ITelemetryService, { useClass: TelemetryService }],
 
             // --- Business Logic Registrations (as Panels) ---
             [IPanel, { useValue: { id: 'mf-generator', title: 'Microflow Generator', component: MicroflowGeneratorPanel, defaultActive: true } }],

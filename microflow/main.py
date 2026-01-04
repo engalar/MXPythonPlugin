@@ -1,5 +1,6 @@
 # region FRAMEWORK CODE
 import json
+import urllib.request
 import traceback
 from typing import Any, Dict, Callable, Iterable
 from abc import ABC, abstractmethod
@@ -229,7 +230,7 @@ class AppController:
         thread = threading.Thread(target=job_runner, daemon=True)
         thread.start()
         self._hub.send(
-            {"type": "JOB_STARTED", "reqId": request["reqId"], "jobId": job_id, "request": request}
+            {"type": "JOB_STARTED", "reqId": request["reqId"], "jobId": job_id, "traceId": request.get('traceId'), "spanId": request.get('spanId')}
         )
 
     def _handle_session_connect(self, request):
@@ -847,15 +848,35 @@ class Container(containers.DeclarativeContainer):
         message_hub=message_hub,
     )
 
+def forward_telemetry_to_jaeger(endpoint, spans):
+    """使用 Python 后端转发追踪数据，规避浏览器 CORS"""
+    if not endpoint or not spans:
+        return
+
+    try:
+        body = json.dumps(spans).encode("utf-8")
+        req = urllib.request.Request(
+            endpoint, data=body, headers={"Content-Type": "application/json"}
+        )
+        # 设置较短的超时，避免阻塞主线程
+        with urllib.request.urlopen(req, timeout=2) as response:
+            if response.status >= 300:
+                pass
+    except Exception as e:
+        traceback.print_exc()
 
 def onMessage(e: Any):
     """Entry point called by Mendix Studio Pro for messages from the UI."""
-    if e.Message != "frontend:message":
-        return
+    # if e.Message != "frontend:message":
+    #     return
     controller = container.app_controller()
     try:
         request_string = JsonSerializer.Serialize(e.Data)
         request_object = json.loads(request_string)
+        if request_object.get('type') == 'telemetry' and request_object.get('method') == 'export':
+            forward_telemetry_to_jaeger(request_object.get('params').get('endpoint'),request_object.get('params').get('spans'))
+            
+
         # send from plugin(html) 'frontend:message' data={ type: 'RPC', reqId, method, params }
         # request.type request.reqId request.jobId request.method request.params
         controller.dispatch(request_object)

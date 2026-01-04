@@ -1,4 +1,4 @@
 {
   "mode": "execution",
-  "defaultPlugin": "MendixDevTool"
+  "defaultPlugin": "microflow"
 }
