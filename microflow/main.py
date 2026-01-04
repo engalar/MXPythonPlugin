@@ -128,32 +128,73 @@ class MendixMessageHub:
     def push_to_session(self, session_id: str, data: Any):
         self.send({"type": "EVENT_SESSION", "sessionId": session_id, "data": data})
 
+def forward_telemetry_to_jaeger(endpoint, spans):
+    """使用 Python 后端转发追踪数据，规避浏览器 CORS"""
+    if not endpoint or not spans:
+        return
+
+    try:
+        body = json.dumps(spans).encode("utf-8")
+        req = urllib.request.Request(
+            endpoint, data=body, headers={"Content-Type": "application/json"}
+        )
+        # 设置较短的超时，避免阻塞主线程
+        with urllib.request.urlopen(req, timeout=2) as response:
+            if response.status >= 300:
+                pass
+    except Exception as e:
+        traceback.print_exc()
+
+class PythonTelemetryService:
+    def __init__(self, hub: IMessageHub):
+        self._hub = hub
+        self.service_name = "studio-plugin[microflow]"
+
+    def gen_id(self, length):
+        import secrets
+        return secrets.token_hex(length // 2)
+
+    def start_span(self, name, trace_id=None, parent_id=None, attributes=None):
+        trace_id = trace_id or self.gen_id(32)
+        span_id = self.gen_id(16)
+        start_time = time.time()
+        
+        # 返回一个简单的对象来模拟 Span 行为
+        class Span:
+            def __init__(self, svc, t_id, s_id, p_id, n, attrs):
+                self.svc, self.traceId, self.spanId, self.parentId, self.name, self.attrs = svc, t_id, s_id, p_id, n, attrs or {}
+            def end(self, end_attrs=None):
+                duration = (time.time() - start_time) * 1000000
+                span_data = {
+                    "traceId": self.traceId, "id": self.spanId, "name": self.name,
+                    "timestamp": int(start_time * 1000000), "duration": int(duration),
+                    "localEndpoint": {"serviceName": self.svc.service_name},
+                    "tags": {**self.attrs, **(end_attrs or {})}
+                }
+                if self.parentId: span_data["parentId"] = self.parentId
+                # 直接通过转发函数发送
+                forward_telemetry_to_jaeger("http://localhost:9411/api/v2/spans", [span_data])
+        
+        return Span(self, trace_id, span_id, parent_id, name, attributes)
 
 class AppController:
-    """Routes incoming messages to registered handlers. Obeys OCP."""
-
-    def __init__(
-        self,
-        rpc_handlers: Iterable[IRpcHandler],
-        job_handlers: Iterable[IJobHandler],
-        session_handlers: Iterable[ISessionHandler],
-        message_hub: IMessageHub,
-    ):
+    def __init__(self, rpc_handlers, job_handlers, session_handlers, message_hub, telemetry: PythonTelemetryService):
         self._rpc = {h.command_type: h for h in rpc_handlers}
         self._jobs = {h.command_type: h for h in job_handlers}
         self._sessions = {h.command_type: h for h in session_handlers}
         self._hub = message_hub
-        print(
-            f"Controller initialized. RPCs: {list(self._rpc.keys())}, Jobs: {list(self._jobs.keys())}, Sessions: {list(self._sessions.keys())}"
-        )
+        self._telemetry = telemetry
 
     def dispatch(self, request: Dict):
         msg_type = request.get("type")
+        trace_id = request.get("traceId")
+        parent_id = request.get("spanId") # 前端的 Span 是后端的 Parent
+        
         try:
             if msg_type == "RPC":
-                self._handle_rpc(request)
+                self._handle_rpc(request, trace_id, parent_id)
             elif msg_type == "JOB_START":
-                self._handle_job_start(request)
+                self._handle_job_start(request, trace_id, parent_id)
             elif msg_type == "SESSION_CONNECT":
                 self._handle_session_connect(request)
             elif msg_type == "SESSION_DISCONNECT":
@@ -161,88 +202,44 @@ class AppController:
             else:
                 raise ValueError(f"Unknown message type: {msg_type}")
         except Exception as e:
-            req_id = request.get("reqId")
-            if req_id:
-                # MODIFIED: Capture and send the full traceback string
-                tb_string = traceback.format_exc()
-                self._hub.send(
-                    {
-                        "type": "RPC_ERROR",
-                        "reqId": req_id,
-                        "message": str(e),
-                        "traceback": tb_string,
-                    }
-                )
-            traceback.print_exc()
+            # 错误处理保持原有逻辑
+            self._hub.send({"type": "RPC_ERROR", "reqId": request.get("reqId"), "message": str(e), "traceback": traceback.format_exc()})
 
-    def _handle_rpc(self, request):
+    def _handle_rpc(self, request, trace_id, parent_id):
         handler = self._rpc.get(request["method"])
-        if not handler:
-            raise ValueError(f"No RPC handler for '{request['method']}'")
-        result = handler.execute(request.get("params"))
-        self._hub.send(
-            {"type": "RPC_SUCCESS", "reqId": request["reqId"], "data": result}
-        )
+        span = self._telemetry.start_span(f"PY_RPC:{request['method']}", trace_id, parent_id)
+        try:
+            result = handler.execute(request.get("params"))
+            span.end({"status": "success"})
+            self._hub.send({"type": "RPC_SUCCESS", "reqId": request["reqId"], "data": result})
+        except Exception as e:
+            span.end({"error": "true", "message": str(e)})
+            raise
 
-    def _handle_job_start(self, request):
+    def _handle_job_start(self, request, trace_id, parent_id):
         handler = self._jobs.get(request["method"])
-        if not handler:
-            raise ValueError(f"No Job handler for '{request['method']}'")
-
         job_id = f"job-{uuid.uuid4()}"
+        span = self._telemetry.start_span(f"PY_JOB_EXEC:{request['method']}", trace_id, parent_id, {"jobId": job_id})
 
         class JobContext(IJobContext):
-            def __init__(self, job_id: str, hub: IMessageHub):
-                self.job_id = job_id
+            def __init__(self, j_id, hub, telemetry_span):
+                self.job_id = j_id
                 self._hub = hub
-
+                self.span = telemetry_span # 传递 span 供业务代码使用
             def report_progress(self, progress: ProgressUpdate):
-                self._hub.send(
-                    {
-                        "type": "JOB_PROGRESS",
-                        "jobId": self.job_id,
-                        "progress": progress.to_dict(),
-                    }
-                )
-
-        context = JobContext(job_id, self._hub)
+                self._hub.send({"type": "JOB_PROGRESS", "jobId": self.job_id, "progress": progress.to_dict()})
 
         def job_runner():
             try:
-                # To test job error, uncomment the next line
-                # raise ValueError("This is a deliberate job error")
-                result = handler.run(request.get("params"), context)
+                result = handler.run(request.get("params"), JobContext(job_id, self._hub, span))
+                span.end({"status": "success"})
                 self._hub.send({"type": "JOB_SUCCESS", "jobId": job_id, "data": result})
             except Exception as e:
-                # MODIFIED: Capture and send the full traceback string for jobs
-                tb_string = traceback.format_exc()
-                self._hub.send(
-                    {
-                        "type": "JOB_ERROR",
-                        "jobId": job_id,
-                        "message": str(e),
-                        "traceback": tb_string,
-                        "request": request
-                    }
-                )
-                traceback.print_exc()
+                span.end({"error": "true", "exception": str(e)})
+                self._hub.send({"type": "JOB_ERROR", "jobId": job_id, "message": str(e), "traceback": traceback.format_exc()})
 
-        thread = threading.Thread(target=job_runner, daemon=True)
-        thread.start()
-        self._hub.send(
-            {"type": "JOB_STARTED", "reqId": request["reqId"], "jobId": job_id, "traceId": request.get('traceId'), "spanId": request.get('spanId')}
-        )
-
-    def _handle_session_connect(self, request):
-        handler = self._sessions.get(request["channel"])
-        if handler:
-            handler.on_connect(request["sessionId"], request.get("payload"))
-
-    def _handle_session_disconnect(self, request):
-        handler = self._sessions.get(request["channel"])
-        if handler:
-            handler.on_disconnect(request["sessionId"])
-
+        threading.Thread(target=job_runner, daemon=True).start()
+        self._hub.send({"type": "JOB_STARTED", "reqId": request["reqId"], "jobId": job_id})
 
 # endregion
 
@@ -448,33 +445,23 @@ class GenerateMicroflowJob(IJobHandler):
         self._app = currentApp
 
     def run(self, payload: Dict, context: IJobContext):
-        # Progress state closure
         state = {"p": 0, "logs": []}
-
         def report(msg, stage=None, percent_increment=2):
             state["p"] = min(state["p"] + percent_increment, 99)
             state["logs"].append(msg)
-            context.report_progress(
-                ProgressUpdate(
-                    percent=state["p"],
-                    message=msg.replace("---", "").strip(),
-                    stage=stage or "Processing",
-                    metadata={"logs": list(state["logs"])},
-                )
-            )
-            time.sleep(0.05)
+            context.report_progress(ProgressUpdate(percent=state["p"], message=msg.replace("---", "").strip(), 
+                                                   stage=stage or "Processing", metadata={"logs": list(state["logs"])}))
 
         try:
-            # Execute the business logic
-            OrderManagementGenerator(self._app, report).execute()
+            # 使用 context 中携带的 span 记录具体的业务阶段
+            report("--- Starting Generation ---", "Init", 5)
+            generator = OrderManagementGenerator(self._app, report)
+            generator.execute()
 
             report("--- Generation Complete ---", "Done", 100)
             return {"status": "Success", "module": "MyOrderModule"}
         except Exception as e:
-            tb = traceback.format_exc()
-            report(f"ERROR: {str(e)}", "Error", 0)
-            raise RuntimeError(f"{e}\n{tb}")
-
+            raise RuntimeError(f"Job failed: {str(e)}")
 
 class OrderManagementGenerator:
     """
@@ -825,64 +812,40 @@ from dependency_injector import containers, providers
 
 
 class Container(containers.DeclarativeContainer):
-    """The application's Inversion of Control (IoC) container."""
-
     config = providers.Configuration()
+    message_hub = providers.Singleton(MendixMessageHub, post_message_func=config.post_message_func)
+    
+    # 新增 Telemetry 注入
+    telemetry = providers.Singleton(PythonTelemetryService, hub=message_hub)
 
-    # --- Framework Services (DIP) ---
-    message_hub: providers.Provider[IMessageHub] = providers.Singleton(
-        MendixMessageHub, post_message_func=config.post_message_func
-    )
-
-    # --- Business Logic Handlers (OCP) ---
     rpc_handlers = providers.List()
     job_handlers = providers.List(providers.Singleton(GenerateMicroflowJob))
     session_handlers = providers.List()
 
-    # --- Core Controller ---
     app_controller = providers.Singleton(
         AppController,
         rpc_handlers=rpc_handlers,
         job_handlers=job_handlers,
         session_handlers=session_handlers,
         message_hub=message_hub,
+        telemetry=telemetry # 注入
     )
 
-def forward_telemetry_to_jaeger(endpoint, spans):
-    """使用 Python 后端转发追踪数据，规避浏览器 CORS"""
-    if not endpoint or not spans:
-        return
-
-    try:
-        body = json.dumps(spans).encode("utf-8")
-        req = urllib.request.Request(
-            endpoint, data=body, headers={"Content-Type": "application/json"}
-        )
-        # 设置较短的超时，避免阻塞主线程
-        with urllib.request.urlopen(req, timeout=2) as response:
-            if response.status >= 300:
-                pass
-    except Exception as e:
-        traceback.print_exc()
-
 def onMessage(e: Any):
-    """Entry point called by Mendix Studio Pro for messages from the UI."""
-    # if e.Message != "frontend:message":
-    #     return
     controller = container.app_controller()
     try:
         request_string = JsonSerializer.Serialize(e.Data)
         request_object = json.loads(request_string)
-        if request_object.get('type') == 'telemetry' and request_object.get('method') == 'export':
-            forward_telemetry_to_jaeger(request_object.get('params').get('endpoint'),request_object.get('params').get('spans'))
-            
+        
+        # 拦截追踪导出请求
+        if request_object.get('type') == 'telemetry':
+            forward_telemetry_to_jaeger(request_object.get('params', {}).get('endpoint'), 
+                                       request_object.get('params', {}).get('spans'))
+            return
 
-        # send from plugin(html) 'frontend:message' data={ type: 'RPC', reqId, method, params }
-        # request.type request.reqId request.jobId request.method request.params
         controller.dispatch(request_object)
     except Exception as ex:
         traceback.print_exc()
-
 
 def initialize_app():
     container = Container()

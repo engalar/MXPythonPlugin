@@ -83,12 +83,11 @@
 
         // --- Telemetry Service ---
         const ITelemetryService = createIdentifier('ITelemetryService');
+        
         class TelemetryService {
             constructor() {
                 this.span$ = new Subject();
                 this.jaegerEndpoint = "http://localhost:9411/api/v2/spans";
-                
-                // 每5秒或满10条导出一次，通过 Python 转发规避 CORS
                 this.span$.pipe(
                     bufferTime(5000, null, 10),
                     filter(batch => batch.length > 0)
@@ -97,35 +96,33 @@
 
             genId(len) { return [...Array(len)].map(() => Math.floor(Math.random() * 16).toString(16)).join(''); }
 
-            startSpan(name, attributes = {}) {
-                const traceId = attributes.traceId || this.genId(32);
+            // 增强：支持传入 parentSpan 建立链路
+            startSpan(name, attributes = {}, parentSpan = null) {
+                const traceId = parentSpan ? parentSpan.traceId : (attributes.traceId || this.genId(32));
+                const parentId = parentSpan ? parentSpan.spanId : undefined;
                 const spanId = this.genId(16);
                 const startTime = Date.now();
+
                 return {
                     traceId,
                     spanId,
-                    addEvent: (name) => {}, // 简化实现
+                    parentId,
                     end: (endAttr = {}) => {
                         this.span$.next({
-                            traceId, id: spanId, name,
+                            traceId, id: spanId, parentId, name,
                             timestamp: startTime * 1000,
                             duration: (Date.now() - startTime) * 1000,
-                            localEndpoint: { serviceName: "microflow-plugin" },
-                            tags: { ...attributes, ...endAttr }
+                            localEndpoint: { serviceName: "studio-plugin[microflow]" },
+                            tags: { ...attributes, ...endAttr, user_agent: navigator.userAgent }
                         });
                     }
                 };
             }
 
             exportBatch(spans) {
-                // 关键：匹配 Python 后端的 request_object.get('params') 结构
                 window.parent.sendMessage('frontend:message', {
-                    type: 'telemetry',
-                    method: 'export',
-                    params: {
-                        endpoint: this.jaegerEndpoint,
-                        spans: spans
-                    }
+                    type: 'telemetry', method: 'export',
+                    params: { endpoint: this.jaegerEndpoint, spans: spans }
                 });
             }
         }
@@ -133,7 +130,8 @@
         const IApiService = createIdentifier('IApiService');
 
         class ApiService {
-            constructor() {
+            constructor(telemetry) {
+                this.telemetry = telemetry;
                 this.reqIdCounter = 0;
                 this.pendingRpcs = new Map();
                 this.activeJobs = new Map();
@@ -146,37 +144,43 @@
                     .subscribe(msg => this._handleBackendMessage(msg));
             }
 
-            // --- Public Methods for Hooks ---
-
-            rpc(method, params) {
+            rpc(method, params, parentSpan = null) {
+                const span = this.telemetry.startSpan(`RPC:${method}`, { method, params: JSON.stringify(params) }, parentSpan);
                 return new Promise((resolve, reject) => {
                     const reqId = `req-${this.reqIdCounter++}`;
-                    this.pendingRpcs.set(reqId, { resolve, reject });
-                    this._sendMessage({ type: 'RPC', reqId, method, params });
+                    this.pendingRpcs.set(reqId, { resolve, reject, span }); // 将 span 存入 pending
+                    this._sendMessage({ type: 'RPC', reqId, method, params, traceId: span.traceId, spanId: span.spanId });
+                    
                     setTimeout(() => {
                         if (this.pendingRpcs.has(reqId)) {
                             this.pendingRpcs.delete(reqId);
+                            span.end({ error: 'timeout' });
                             reject(new Error(`RPC call '${method}' timed out.`));
                         }
-                    }, 10000);
+                    }, 15000);
                 });
             }
 
-            startJob(method, params, { traceId, spanId }) {
+            startJob(method, params, parentSpan = null) {
+                const span = this.telemetry.startSpan(`JOB_START:${method}`, { method }, parentSpan);
                 const subject = new Subject();
                 const reqId = `req-${this.reqIdCounter++}`;
 
                 const promise = new Promise((resolve, reject) => {
                     this.pendingRpcs.set(reqId, {
                         resolve: ({ jobId }) => {
-                            this.activeJobs.set(jobId, subject);
+                            span.end({ jobId });
+                            this.activeJobs.set(jobId, { subject, parentSpan: span }); // 关联 span 供后续进度追踪
                             resolve({ jobId });
                         },
-                        reject
+                        reject: (err) => {
+                            span.end({ error: true, ...err });
+                            reject(err);
+                        }
                     });
                 });
 
-                this._sendMessage({ type: 'JOB_START', reqId, method, params, traceId, spanId });
+                this._sendMessage({ type: 'JOB_START', reqId, method, params, traceId: span.traceId, spanId: span.spanId });
                 return { startPromise: promise, updates$: subject.asObservable() };
             }
 
@@ -205,48 +209,43 @@
                 return this.broadcastChannels.get(channel).asObservable();
             }
 
-            // --- Internal Message Handling ---
-
-            _sendMessage(data) {
-                // html<here> -> webview -> c# -> python<onMessage>
-                window.parent.sendMessage('frontend:message', data);
-            }
+            _sendMessage(data) { window.parent.sendMessage('frontend:message', data); }
 
             _handleBackendMessage(msg) {
                 const { type, reqId, jobId, sessionId, channel } = msg;
 
                 switch (type) {
-                    // FOR RPC
-                    // send from plugin backend AppController._handle_rpc
                     case 'RPC_SUCCESS':
-                        this.pendingRpcs.get(reqId)?.resolve(msg.data);
+                        const rpcInfo = this.pendingRpcs.get(reqId);
+                        rpcInfo?.span?.end({ status: 'success' });
+                        rpcInfo?.resolve(msg.data);
                         this.pendingRpcs.delete(reqId);
                         break;
                     case 'RPC_ERROR':
-                        this.pendingRpcs.get(reqId)?.reject({ message: msg.message, traceback: msg.traceback });
+                        const rpcErrInfo = this.pendingRpcs.get(reqId);
+                        rpcErrInfo?.span?.end({ error: true, message: msg.message });
+                        rpcErrInfo?.reject({ message: msg.message, traceback: msg.traceback });
                         this.pendingRpcs.delete(reqId);
                         break;
-                    // FOR JOB
-                    // send from plugin backend AppController._handle_job_start
                     case 'JOB_STARTED':
                         this.pendingRpcs.get(reqId)?.resolve({ jobId });
                         this.pendingRpcs.delete(reqId);
                         break;
                     case 'JOB_PROGRESS':
-                        this.activeJobs.get(jobId)?.next({ type: 'progress', ...msg });
+                        this.activeJobs.get(jobId)?.subject.next({ type: 'JOB_PROGRESS', ...msg });
                         break;
                     case 'JOB_SUCCESS':
-                        this.activeJobs.get(jobId)?.next({ type: 'success', ...msg });
-                        this.activeJobs.get(jobId)?.complete();
+                        const jobSuccess = this.activeJobs.get(jobId);
+                        jobSuccess?.subject.next({ type: 'JOB_SUCCESS', ...msg });
+                        jobSuccess?.subject.complete();
                         this.activeJobs.delete(jobId);
                         break;
                     case 'JOB_ERROR':
-                        this.activeJobs.get(jobId)?.next({ type: 'error', ...msg });
-                        this.activeJobs.get(jobId)?.complete();
+                        const jobError = this.activeJobs.get(jobId);
+                        jobError?.subject.next({ type: 'JOB_ERROR', ...msg });
+                        jobError?.subject.complete();
                         this.activeJobs.delete(jobId);
                         break;
-                    // FOR EVENT
-                    // send from plugin backend AppController._handle_session_connect [目前未实现完整]
                     case 'EVENT_BROADCAST':
                         this.broadcastChannels.get(channel)?.next(msg.data);
                         break;
@@ -256,62 +255,71 @@
                 }
             }
         }
-        setDependencies(ApiService, []);
+        setDependencies(ApiService, [ITelemetryService]);
 
         // --- High-Level React Hooks (Simplifying Boilerplate) ---
 
         function useRpc(method) {
             const api = useDependency(IApiService);
+            const telemetry = useDependency(ITelemetryService);
             const [state, setState] = useState({ isLoading: false, data: null, error: null });
 
             const execute = useCallback(async (params) => {
+                const uiSpan = telemetry.startSpan(`UI_EXECUTE:${method}`);
                 setState({ isLoading: true, data: null, error: null });
                 try {
-                    const result = await api.rpc(method, params);
+                    const result = await api.rpc(method, params, uiSpan);
                     setState({ isLoading: false, data: result, error: null });
+                    uiSpan.end({ result: 'ok' });
                     return result;
                 } catch (err) {
                     setState({ isLoading: false, data: null, error: err });
+                    uiSpan.end({ result: 'error', error_msg: err.message });
                     throw err;
                 }
-            }, [api, method]);
+            }, [api, telemetry, method]);
             return { ...state, execute };
         }
 
         const initialJobState = { status: 'idle', progress: { percent: 0, message: '' }, data: null, error: null };
+        
         function useJob(method) {
             const api = useDependency(IApiService);
+            const telemetry = useDependency(ITelemetryService);
             const [state, setState] = useState(initialJobState);
             const subRef = useRef(null);
 
-            const start = useCallback((params, span) => {
+            const start = useCallback((params, parentSpan = null) => {
+                const uiSpan = telemetry.startSpan(`UI_JOB_RUN:${method}`, {}, parentSpan);
                 setState({ ...initialJobState, status: 'starting' });
-                const { startPromise, updates$ } = api.startJob(method, params, span);
+                
+                const { startPromise, updates$ } = api.startJob(method, params, uiSpan);
 
                 startPromise.then(({ jobId }) => {
                     subRef.current = updates$.subscribe({
                         next: (update) => {
-                            if (update.type === "JOB_PROGRESS") setState(s => ({ ...s, status: 'running', progress: update.progress }));
-                            else if (update.type === "JOB_SUCCESS") setState(s => {
-                                s.progress.percent = 100;
-                                return { ...s, status: 'success', data: update.data };
-                            })
-                            else if (update.type === 'JOB_ERROR') setState(s => ({ ...s, status: 'error', error: { message: update.message, traceback: update.traceback } }));
+                            if (update.type === "JOB_PROGRESS") {
+                                setState(s => ({ ...s, status: 'running', progress: update.progress }));
+                            } else if (update.type === "JOB_SUCCESS") {
+                                uiSpan.end({ status: 'completed' });
+                                setState(s => ({ ...s, status: 'success', data: update.data, progress: { ...s.progress, percent: 100 } }));
+                            } else if (update.type === 'JOB_ERROR') {
+                                uiSpan.end({ status: 'failed', error: update.message });
+                                setState(s => ({ ...s, status: 'error', error: { message: update.message, traceback: update.traceback } }));
+                            }
                         },
-                        error: (err) => setState(s => ({ ...s, status: 'error', error: err })),
-                        complete: () => {
-                            // Handled by success/error messages
+                        error: (err) => {
+                            uiSpan.end({ status: 'stream_error', error: err.message });
+                            setState(s => ({ ...s, status: 'error', error: err }));
                         }
                     });
                 }).catch(err => {
+                    uiSpan.end({ status: 'start_failed', error: err.message });
                     setState({ ...initialJobState, status: 'error', error: err });
                 });
-            }, [api, method]);
+            }, [api, telemetry, method]);
 
-            useEffect(() => {
-                // Cleanup subscription on unmount
-                return () => subRef.current?.unsubscribe();
-            }, []);
+            useEffect(() => { return () => subRef.current?.unsubscribe(); }, []);
 
             return { ...state, start };
         }
@@ -535,13 +543,13 @@
 
             useEffect(scrollToBottom, [logs]);
 
-            const handleStart = () => {
+            const handleStart = async() => {
                 setLogs([]);
                 // 启动追踪
-                const span = telemetry.startSpan('Microflow:Generate:Click');
+                const span = telemetry.startSpan('MicroflowGeneratorPanel:handleStart', { rpc: 'useJob:microflow:generate' });
                 
                 // 传递 traceId 到后端 Job
-                start({}, span);
+                await start({}, span);
                 
                 span.end({ action: 'start_job' });
             };
