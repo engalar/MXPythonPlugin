@@ -500,56 +500,84 @@ class OrderManagementGenerator:
             transaction.Dispose()
 
     def step_test(self, tx):
+        # API 无法直接获取System模块，所以QualifiedName、EntityName、AssociationName等不能涉及系统模块
+        # raise Exception(" ".join(m.Name for m in currentApp.Root.GetModules()))
         data = {
             "requests": [
+                # {
+                #     "FullPath": "MyFirstModule/Folder1/Folder2/MyMicroflow",
+                #     "ReturnType": {"TypeName": "String", "QualifiedName": None},
+                #     "ReturnExp": "'Success'",
+                #     "Parameters": [
+                #         {
+                #             "Name": "CurrentUser",
+                #             "Type": {
+                #                 "TypeName": "Object",
+                #                 "QualifiedName": "System.User",
+                #             },
+                #         }
+                #     ],
+                #     "Activities": [
+                #         {
+                #             "ActivityType": "Retrieve",
+                #             "SourceVariable": "CurrentUser",
+                #             "AssociationName": "System.UserRoles",
+                #             "OutputVariable": "RetrievedRoleList",
+                #         },
+                #         {
+                #             "ActivityType": "Change",
+                #             "VariableName": "CurrentUser",
+                #             "EntityName": "System.User",
+                #             "Changes": [
+                #                 {
+                #                     "AttributeName": "Name",
+                #                     "ValueExpression": "'New_Admin_Name'",
+                #                 }
+                #             ],
+                #             "Commit": "Yes",
+                #         },
+                #     ],
+                # },
                 {
                     "FullPath": "MyFirstModule/Folder1/Folder2/MyMicroflow",
-                    "ReturnType": {"TypeName": "String"},
-                    "ReturnExp": "'Hello, World!'",
+                    "ReturnType": {"TypeName": "String", "QualifiedName": None},
+                    "ReturnExp": "'Success'",
                     "Parameters": [
                         {
-                            "Name": "param1",
-                            "Type": {"TypeName": "String"},
-                        },
-                        {
-                            "Name": "param2",
+                            "Name": "AccountPasswordData",
                             "Type": {
-                                "TypeName": "Enumeration",
-                                "QualifiedName": "System.DeviceType",
+                                "TypeName": "Object",
+                                "QualifiedName": "Administration.AccountPasswordData",
                             },
-                        },
-                        {
-                            "Name": "param3",
-                            "Type": {"TypeName": "DateTime"},
-                        },
-                        {
-                            "Name": "param4",
-                            "Type": {
-                                "TypeName": "List",
-                                "QualifiedName": "System.User",
-                            },
-                        },
-                    ],
-                    "Activities": [],
-                },
-                {
-                    "FullPath": "MySecondModule/MyMicroflow",
-                    "ReturnType": {"TypeName": "Void"},
-                    "Parameters": [
-                        {
-                            "Name": "param1",
-                            "Type": {"TypeName": "Integer"},
                         }
                     ],
-                    "Activities": [],
+                    "Activities": [
+                        {
+                            "ActivityType": "Retrieve",
+                            "SourceVariable": "AccountPasswordData",
+                            # "AssociationName": "System.UserRoles",
+                            "AssociationName": "Administration.AccountPasswordData_Account",
+                            "OutputVariable": "Account",
+                        },
+                        {
+                            "ActivityType": "Change",
+                            "VariableName": "Account",
+                            "EntityName": "Administration.Account",
+                            "Changes": [
+                                {
+                                    "AttributeName": "FullName",
+                                    "ValueExpression": "'New_Admin_Name'",
+                                }
+                            ],
+                            "Commit": "Yes",
+                        },
+                    ],
                 },
             ]
         }
         input = CreateMicroflowsToolInput(**data)
-        # self.report(input.requests[0].parameters[0].name)
-        
         report = microflow.create_microflows(ctx, input, tx)
-        # self.report(report)
+        self.report(report)
 
     def step_domain_model(self):
         self.report("--- Building Domain Model ---", "Domain Model", 10)
