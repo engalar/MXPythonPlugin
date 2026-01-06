@@ -498,20 +498,23 @@ class OrderManagementGenerator:
             raise
         finally:
             transaction.Dispose()
-    
+
     def step_test(self, tx):
         # 演示：构建一个涵盖 Database/Association Retrieve, ListOperation(Union/Head), Aggregate, Change, Commit 的全功能微流
         mf_path = f"{self.MODULE}/ComplexLogic/Test_All_Capabilities"
-        
+
         # 准备全限定名
         order_qn = f"{self.MODULE}.Order"
         product_qn = f"{self.MODULE}.Product"
         customer_qn = f"{self.MODULE}.Customer"
-        
+
+        product_price_attr=f"{product_qn}.Price"
+        product_name_attr=f"{product_qn}.Name"
+
         # 关联名称 (需与 Domain Model 建立的名称一致)
         assoc_order_product = f"{self.MODULE}.Order_Product"
         assoc_customer_order = f"{self.MODULE}.Customer_Order"
-        
+
         data = {
             "requests": [
                 {
@@ -550,25 +553,12 @@ class OrderManagementGenerator:
                             "AssociationName": assoc_order_product,
                             "OutputVariable": "ExistingOrderProducts",
                         },
-
-                        # 3. [ListOperation: Binary] 将数据库查询结果与已有产品取并集 (Union)
-                        # 目前API不支持Union
-                        # {
-                        #     "ActivityType": "ListOperation",
-                        #     "OperationType": "Union",
-                        #     "InputListVariable": "ExistingOrderProducts",
-                        #     "BinaryOperationListVariable": "HighValueDbProducts",
-                        #     "OutputVariable": "MergedProductList",
-                        # },
-
-                        # 4. [ListOperation: Unary] 获取合并列表的第一个产品 (Head)
                         {
                             "ActivityType": "ListOperation",
                             "OperationType": "Head",
                             "InputListVariable": "ExistingOrderProducts",
                             "OutputVariable": "TopProduct",
                         },
-
                         # 5. [Retrieve: Association] 获取订单关联的客户 (单对象)
                         {
                             "ActivityType": "Retrieve",
@@ -577,7 +567,6 @@ class OrderManagementGenerator:
                             "AssociationName": assoc_customer_order,
                             "OutputVariable": "OrderCustomer",
                         },
-
                         # 6. [Aggregate] 计算合并后的产品数量
                         {
                             "ActivityType": "AggregateList",
@@ -607,16 +596,101 @@ class OrderManagementGenerator:
                             "ActivityType": "Commit",
                             "VariableName": "OrderParam",
                             "RefreshClient": True
-                        }
+                        },
+                        # --- 1. [CreateList] 创建一个空的产品列表 ---
+                        {
+                            "ActivityType": "CreateList",
+                            "EntityName": product_qn,
+                            "OutputVariable": "TempProcessingList",
+                        },
+                        # --- 2. [CreateObject] 创建一个新对象并初始化属性 ---
+                        {
+                            "ActivityType": "CreateObject",
+                            "EntityName": product_qn,
+                            "OutputVariable": "NewPromoProduct",
+                            "Commit": "No",
+                            "RefreshClient": False,
+                            "InitialValues": [
+                                {
+                                    "AttributeName": "Price",
+                                    "ValueExpression": "2.4",
+                                },
+                            ],
+                        },
+                        # --- 3. [ChangeList] 将新对象添加到列表中 ---
+                        {
+                            "ActivityType": "ChangeList",
+                            "Operation": "Add",
+                            "ListVariable": "TempProcessingList",
+                            "ValueExpression": "$NewPromoProduct",
+                        },
+                        # --- 4. [FilterList] 通过属性过滤列表 (例如: 找出价格为 100 的产品) ---
+                        # 注意：FilterListByAttribute 通常用于精确匹配
+                        {
+                            "ActivityType": "FilterList",
+                            "FilterBy": "Attribute",
+                            "ListVariable": "ExistingOrderProducts",  # 假设这是之前 Retrieve 获取的列表
+                            "MemberName": product_price_attr,  # 需要完整的限定名 Module.Entity.Attribute
+                            "OutputVariable": "StandardPriceProducts",
+                            "Expression": "100.00",
+                        },
+                        # --- 5. [SortList] 对列表进行内存排序 ---
+                        {
+                            "ActivityType": "SortList",
+                            "ListVariable": "ExistingOrderProducts",
+                            "OutputVariable": "SortedProducts",
+                            "Sorting": [
+                                {
+                                    "AttributeName": product_price_attr,  # 需要完整的限定名
+                                    "Ascending": False,
+                                }
+                            ],
+                        },
+                        # --- 6. [FindList] 通过表达式在列表中查找特定对象 ---
+                        {
+                            "ActivityType": "FindList",
+                            "FindBy": "Expression",
+                            "ListVariable": "SortedProducts",
+                            "OutputVariable": "FoundExpensiveProduct",
+                            "Expression": "$currentObject/Price > 500",  # 使用 $currentObject
+                        },
+                        # --- 7. [AggregateList - Reduce] 使用 Reduce 计算总价 (新功能) ---
+                        {
+                            "ActivityType": "AggregateList",
+                            "Function": "Reduce",
+                            "InputListVariable": "ExistingOrderProducts",
+                            "OutputVariable": "CalculatedTotalPrice",
+                            "ResultType": {
+                                "TypeName": "Decimal",
+                                "QualifiedName": None,
+                            },
+                            "InitExpression": "0.00",
+                            "Expression": "$currentResult + $currentObject/Price",
+                        },
+                        # --- 8. [Delete] 删除刚才创建的临时对象 ---
+                        {"ActivityType": "Delete", "VariableName": "NewPromoProduct"},
+                        # --- 9. [ChangeList] 清空列表 ---
+                        {
+                            "ActivityType": "ChangeList",
+                            "Operation": "Clear",
+                            "ListVariable": "TempProcessingList",
+                            "ValueExpression": "empty",  # Clear 操作通常忽略表达式，但为了兼容性填 empty
+                        },
+                        # --- 10. [Rollback] 回滚传入的订单对象 ---
+                        {
+                            "ActivityType": "Rollback",
+                            "VariableName": "OrderParam",
+                            "RefreshClient": True,
+                        },
                     ],
                 }
             ]
         }
-        
+
         self.report(f"Generating comprehensive test microflow: {mf_path}")
         # 验证 DTO 并执行
         input_dto = CreateMicroflowsToolInput(**data)
-        
+
         # 调用 microflow.py 中的逻辑
         result_log = microflow.create_microflows(ctx, input_dto, tx)
         self.report(result_log)

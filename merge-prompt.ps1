@@ -56,7 +56,7 @@ foreach ($rawPath in $TargetRoots) {
         ($_.FullName -notmatch "[\\/]typings[\\/]") -and
         
         # 3. 排除特定配置文件 (新增逻辑)
-        ($_.Name -notlike "*.editorConfig.ts") -and
+        ($_.Name -notlike "debug*") -and
         ($_.Name -notlike "*.editorPreview.tsx")
     }
 
