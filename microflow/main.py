@@ -498,86 +498,128 @@ class OrderManagementGenerator:
             raise
         finally:
             transaction.Dispose()
-
+    
     def step_test(self, tx):
-        # API 无法直接获取System模块，所以QualifiedName、EntityName、AssociationName等不能涉及系统模块
-        # raise Exception(" ".join(m.Name for m in currentApp.Root.GetModules()))
+        # 演示：构建一个涵盖 Database/Association Retrieve, ListOperation(Union/Head), Aggregate, Change, Commit 的全功能微流
+        mf_path = f"{self.MODULE}/ComplexLogic/Test_All_Capabilities"
+        
+        # 准备全限定名
+        order_qn = f"{self.MODULE}.Order"
+        product_qn = f"{self.MODULE}.Product"
+        customer_qn = f"{self.MODULE}.Customer"
+        
+        # 关联名称 (需与 Domain Model 建立的名称一致)
+        assoc_order_product = f"{self.MODULE}.Order_Product"
+        assoc_customer_order = f"{self.MODULE}.Customer_Order"
+        
         data = {
             "requests": [
-                # {
-                #     "FullPath": "MyFirstModule/Folder1/Folder2/MyMicroflow",
-                #     "ReturnType": {"TypeName": "String", "QualifiedName": None},
-                #     "ReturnExp": "'Success'",
-                #     "Parameters": [
-                #         {
-                #             "Name": "CurrentUser",
-                #             "Type": {
-                #                 "TypeName": "Object",
-                #                 "QualifiedName": "System.User",
-                #             },
-                #         }
-                #     ],
-                #     "Activities": [
-                #         {
-                #             "ActivityType": "Retrieve",
-                #             "SourceVariable": "CurrentUser",
-                #             "AssociationName": "System.UserRoles",
-                #             "OutputVariable": "RetrievedRoleList",
-                #         },
-                #         {
-                #             "ActivityType": "Change",
-                #             "VariableName": "CurrentUser",
-                #             "EntityName": "System.User",
-                #             "Changes": [
-                #                 {
-                #                     "AttributeName": "Name",
-                #                     "ValueExpression": "'New_Admin_Name'",
-                #                 }
-                #             ],
-                #             "Commit": "Yes",
-                #         },
-                #     ],
-                # },
                 {
-                    "FullPath": "MyFirstModule/Folder1/Folder2/MyMicroflow",
-                    "ReturnType": {"TypeName": "String", "QualifiedName": None},
-                    "ReturnExp": "'Success'",
+                    "FullPath": mf_path,
+                    "ReturnType": {"TypeName": "Boolean", "QualifiedName": None},
+                    "ReturnExp": "true",
                     "Parameters": [
                         {
-                            "Name": "AccountPasswordData",
+                            "Name": "OrderParam",
                             "Type": {
                                 "TypeName": "Object",
-                                "QualifiedName": "Administration.AccountPasswordData",
+                                "QualifiedName": order_qn,
                             },
                         }
                     ],
                     "Activities": [
+                        # 1. [Retrieve: Database] 查找数据库中价格 > 50 的产品
                         {
                             "ActivityType": "Retrieve",
-                            "SourceVariable": "AccountPasswordData",
-                            # "AssociationName": "System.UserRoles",
-                            "AssociationName": "Administration.AccountPasswordData_Account",
-                            "OutputVariable": "Account",
+                            "SourceType": "Database",
+                            "EntityName": product_qn,
+                            "XPathConstraint": "[Price > 50]",
+                            "RangeIndex": "1",
+                            "RangeAmount": "5",
+                            # RetrieveJustFirstItem and [RangeIndex RangeAmount]只能二选一
+                            # "RetrieveJustFirstItem": True,
+                            "Sorting": [{"AttributeName": "Price", "Ascending": False}],
+                            "OutputVariable": "HighValueDbProducts",
                         },
+                        
+                        # 2. [Retrieve: Association] 获取当前订单关联的已有产品列表
+                        {
+                            "ActivityType": "Retrieve",
+                            "SourceType": "Association",
+                            "SourceVariable": "OrderParam",
+                            "AssociationName": assoc_order_product,
+                            "OutputVariable": "ExistingOrderProducts",
+                        },
+
+                        # 3. [ListOperation: Binary] 将数据库查询结果与已有产品取并集 (Union)
+                        # 目前API不支持Union
+                        # {
+                        #     "ActivityType": "ListOperation",
+                        #     "OperationType": "Union",
+                        #     "InputListVariable": "ExistingOrderProducts",
+                        #     "BinaryOperationListVariable": "HighValueDbProducts",
+                        #     "OutputVariable": "MergedProductList",
+                        # },
+
+                        # 4. [ListOperation: Unary] 获取合并列表的第一个产品 (Head)
+                        {
+                            "ActivityType": "ListOperation",
+                            "OperationType": "Head",
+                            "InputListVariable": "ExistingOrderProducts",
+                            "OutputVariable": "TopProduct",
+                        },
+
+                        # 5. [Retrieve: Association] 获取订单关联的客户 (单对象)
+                        {
+                            "ActivityType": "Retrieve",
+                            "SourceType": "Association",
+                            "SourceVariable": "OrderParam",
+                            "AssociationName": assoc_customer_order,
+                            "OutputVariable": "OrderCustomer",
+                        },
+
+                        # 6. [Aggregate] 计算合并后的产品数量
+                        {
+                            "ActivityType": "AggregateList",
+                            "Function": "Count",
+                            "InputListVariable": "ExistingOrderProducts",
+                            "OutputVariable": "TotalCount",
+                        },
+
+                        # 7. [Change] 更新订单描述
+                        # 逻辑：描述 = 客户名 + ": " + 数量
                         {
                             "ActivityType": "Change",
-                            "VariableName": "Account",
-                            "EntityName": "Administration.Account",
+                            "VariableName": "OrderParam",
+                            "EntityName": order_qn,
                             "Changes": [
                                 {
-                                    "AttributeName": "FullName",
-                                    "ValueExpression": "'New_Admin_Name'",
+                                    "AttributeName": "Description",
+                                    "Action": "Set", 
+                                    "ValueExpression": "$TopProduct/Price + ': Potential Items ' + toString($TotalCount)",
                                 }
                             ],
-                            "Commit": "Yes",
+                            "Commit": "No", 
                         },
+                        
+                        # 8. [Commit] 提交订单并刷新客户端
+                        {
+                            "ActivityType": "Commit",
+                            "VariableName": "OrderParam",
+                            "RefreshClient": True
+                        }
                     ],
-                },
+                }
             ]
         }
-        input = CreateMicroflowsToolInput(**data)
-        report = microflow.create_microflows(ctx, input, tx)
-        self.report(report)
+        
+        self.report(f"Generating comprehensive test microflow: {mf_path}")
+        # 验证 DTO 并执行
+        input_dto = CreateMicroflowsToolInput(**data)
+        
+        # 调用 microflow.py 中的逻辑
+        result_log = microflow.create_microflows(ctx, input_dto, tx)
+        self.report(result_log)
 
     def step_domain_model(self):
         self.report("--- Building Domain Model ---", "Domain Model", 10)
@@ -870,7 +912,6 @@ def onMessage(e: Any):
             forward_telemetry_to_jaeger(request_object.get('params', {}).get('endpoint'), 
                                        request_object.get('params', {}).get('spans'))
             return
-
         controller.dispatch(request_object)
     except Exception as ex:
         traceback.print_exc()
