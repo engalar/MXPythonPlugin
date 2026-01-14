@@ -1,4 +1,4 @@
 {
   "mode": "execution",
-  "defaultPlugin": "microflow"
+  "defaultPlugin": "mcp"
 }
